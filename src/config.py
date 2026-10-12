@@ -37,13 +37,15 @@ BLOCK_SIZE_STRINGS = ["8x8", "16x16", "32x32"]
 
 
 def parse_block_size(val: str) -> Tuple[int, int]:
-    """Parse block size representation like '16x16' or '16×16' to tuple (16, 16)."""
+    """Parse block size representation like '16x16' or '16×16' to tuple (w, h).
+    Accepts only values defined in AVAILABLE_BLOCK_SIZES.
+    """
     val = str(val).replace("×", "x").strip().lower()
-    if "8" in val:
-        return (8, 8)
-    if "32" in val:
-        return (32, 32)
-    return (16, 16)
+    allowed = {f"{w}x{h}" for w, h in AVAILABLE_BLOCK_SIZES}
+    if val in allowed:
+        w, h = map(int, val.split("x"))
+        return (w, h)
+    raise ValueError(f"Invalid block size '{val}'. Must be one of {sorted(allowed)}")
 
 
 @dataclass

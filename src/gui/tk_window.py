@@ -22,6 +22,7 @@ from src.config import (
 from src.patterns import create_initial_grid, PATTERN_NAMES
 from src.preview import render_preview_image
 from src.benchmark import run_benchmark
+from src.gui.results_window import ResultsWindow
 
 
 class GameOfLifeSettingsWindow:
@@ -313,7 +314,7 @@ class GameOfLifeSettingsWindow:
         """Triggered when the user clicks the Run button."""
         config = self.get_config()
         self.lbl_run_status.config(
-            text=f"Status: Executing {config.run_mode} ({config.grid_size}x{config.grid_size}, {config.iterations} steps)...",
+            text=f"Status: Launching {config.run_mode} ({config.grid_size}x{config.grid_size}, {config.iterations} steps)...",
             foreground="#38bdf8"
         )
         self.root.update_idletasks()
@@ -322,16 +323,13 @@ class GameOfLifeSettingsWindow:
             # Delegate to custom callback if provided
             self.on_run_callback(config)
         else:
-            # Default action: execute benchmark and display results
+            # Default action: open the Results Window with live simulation
             try:
-                res = run_benchmark(config)
-                speedup_msg = f" | Speedup: {res.kernel_speedup:.2f}x" if res.kernel_speedup else ""
-                match_msg = " [Results Match!]" if res.grids_match else ""
+                ResultsWindow(self.root, config)
                 self.lbl_run_status.config(
-                    text=f"Status: Done! CPU: {res.cpu_time_sec*1000 if res.cpu_time_sec else 0:.1f}ms | GPU: {res.cuda_kernel_time_sec*1000 if res.cuda_kernel_time_sec else 0:.1f}ms{speedup_msg}{match_msg}",
+                    text="Status: Results window opened — simulation running.",
                     foreground="#4ade80"
                 )
-                print(res.summary_table())
             except Exception as e:
                 self.lbl_run_status.config(text=f"Status Error: {e}", foreground="#f87171")
 

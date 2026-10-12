@@ -2,14 +2,50 @@
 Benchmark module comparing CPU vs CUDA performance for Conway's Game of Life.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+import platform
+import sys
+from dataclasses import dataclass, field
+from typing import Optional, List
 import numpy as np
 
 from src.config import SimulationConfig, RunMode
 from src.patterns import create_initial_grid
 from src.cpu_engine import CPUEngine
 from src.cuda_engine import CUDAEngine
+
+
+def get_hardware_info() -> dict:
+    """
+    Collect hardware/software information for the benchmark report.
+    Returns a dict with cpu_name, gpu_name, cuda_version keys.
+    """
+    cpu_name = platform.processor() or platform.machine() or "Unknown CPU"
+    # Try to get a friendlier CPU name on macOS / Linux
+    try:
+        import subprocess
+        if sys.platform == "darwin":
+            out = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True
+            ).strip()
+            if out:
+                cpu_name = out
+        elif sys.platform == "linux":
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if "model name" in line:
+                        cpu_name = line.split(":")[1].strip()
+                        break
+    except Exception:
+        pass
+
+    gpu_info = CUDAEngine.get_gpu_info()
+
+    return {
+        "cpu_name": cpu_name,
+        "gpu_name": gpu_info.get("gpu_name", "N/A"),
+        "cuda_version": gpu_info.get("cuda_version", "N/A"),
+        "vram_bytes": gpu_info.get("vram_bytes", 0),
+    }
 
 
 @dataclass
@@ -31,6 +67,69 @@ class BenchmarkResult:
     total_speedup: Optional[float] = None
     grids_match: Optional[bool] = None
     error_message: Optional[str] = None
+
+    # --- Extended stats for the Results Window ---
+    # Per-step timing lists (for dynamic graph)
+    per_step_times_cpu: List[float] = field(default_factory=list)
+    per_step_times_gpu: List[float] = field(default_factory=list)
+
+    # Derived stats (populated after simulation completes)
+    avg_ms_per_gen_cpu: Optional[float] = None
+    avg_ms_per_gen_gpu: Optional[float] = None
+    min_ms_per_gen_cpu: Optional[float] = None
+    min_ms_per_gen_gpu: Optional[float] = None
+    max_ms_per_gen_cpu: Optional[float] = None
+    max_ms_per_gen_gpu: Optional[float] = None
+
+    throughput_cpu: Optional[float] = None   # cells/sec
+    throughput_gpu: Optional[float] = None   # cells/sec
+
+    gpu_transfer_time_sec: Optional[float] = None  # total_time - kernel_time
+    memory_bytes_cpu: Optional[int] = None
+    memory_bytes_gpu: Optional[int] = None
+
+    final_alive_cpu: Optional[int] = None
+    final_alive_gpu: Optional[int] = None
+
+    # Hardware info
+    cpu_name: str = ""
+    gpu_name: str = ""
+    cuda_version: str = ""
+
+    def compute_derived_stats(self):
+        """Calculate derived statistics from raw timing data."""
+        total_cells = self.grid_size * self.grid_size
+
+        if self.per_step_times_cpu:
+            self.avg_ms_per_gen_cpu = sum(self.per_step_times_cpu) / len(self.per_step_times_cpu)
+            self.min_ms_per_gen_cpu = min(self.per_step_times_cpu)
+            self.max_ms_per_gen_cpu = max(self.per_step_times_cpu)
+            self.cpu_time_sec = sum(self.per_step_times_cpu) / 1000.0
+            self.cpu_steps_per_sec = len(self.per_step_times_cpu) / self.cpu_time_sec if self.cpu_time_sec > 0 else float("inf")
+            # Throughput: cells updated per second  = (total_cells * generations) / total_time
+            self.throughput_cpu = (total_cells * len(self.per_step_times_cpu)) / self.cpu_time_sec if self.cpu_time_sec > 0 else 0
+
+        if self.per_step_times_gpu:
+            self.avg_ms_per_gen_gpu = sum(self.per_step_times_gpu) / len(self.per_step_times_gpu)
+            self.min_ms_per_gen_gpu = min(self.per_step_times_gpu)
+            self.max_ms_per_gen_gpu = max(self.per_step_times_gpu)
+            self.cuda_kernel_time_sec = sum(self.per_step_times_gpu) / 1000.0
+            self.cuda_steps_per_sec = len(self.per_step_times_gpu) / self.cuda_kernel_time_sec if self.cuda_kernel_time_sec > 0 else float("inf")
+            self.throughput_gpu = (total_cells * len(self.per_step_times_gpu)) / self.cuda_kernel_time_sec if self.cuda_kernel_time_sec > 0 else 0
+
+        # GPU transfer overhead
+        if self.cuda_total_time_sec is not None and self.cuda_kernel_time_sec is not None:
+            self.gpu_transfer_time_sec = max(0, self.cuda_total_time_sec - self.cuda_kernel_time_sec)
+
+        # Speedups
+        if self.cpu_time_sec and self.cuda_kernel_time_sec and self.cuda_kernel_time_sec > 0:
+            self.kernel_speedup = self.cpu_time_sec / self.cuda_kernel_time_sec
+        if self.cpu_time_sec and self.cuda_total_time_sec and self.cuda_total_time_sec > 0:
+            self.total_speedup = self.cpu_time_sec / self.cuda_total_time_sec
+
+        # Memory estimates (uint8 grid)
+        self.memory_bytes_cpu = total_cells  # 1 byte per cell (uint8)
+        self.memory_bytes_gpu = total_cells  # same grid size on GPU
 
     def summary_table(self) -> str:
         """Format results as a readable markdown-like table."""
