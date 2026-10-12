@@ -80,3 +80,18 @@ class CPUEngine:
         elapsed_time = time.perf_counter() - start_time
 
         return current_grid, elapsed_time
+
+    def run_stepwise(self, initial_grid: np.ndarray, iterations: int):
+        """
+        Generator that yields timing data after each generation step.
+
+        Yields:
+            Tuple[int, np.ndarray, float]: (generation_number, grid_snapshot, step_time_ms)
+        """
+        current_grid = initial_grid.copy()
+
+        for gen in range(1, iterations + 1):
+            step_start = time.perf_counter()
+            current_grid = self.step(current_grid)
+            step_ms = (time.perf_counter() - step_start) * 1000.0
+            yield gen, current_grid, step_ms

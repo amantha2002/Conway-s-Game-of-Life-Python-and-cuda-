@@ -168,3 +168,65 @@ class CUDAEngine:
         """Advance single step on GPU (useful for live view / debug)."""
         final_grid, _, _ = self.run(grid, iterations=1)
         return final_grid
+
+    def run_stepwise(self, initial_grid: np.ndarray, iterations: int):
+        """
+        Generator that yields timing data after each generation step on GPU.
+
+        For live visualization this transfers the grid back to host each step.
+        This adds overhead compared to bulk run but enables real-time display.
+
+        Yields:
+            Tuple[int, np.ndarray, float]: (generation_number, grid_snapshot, step_time_ms)
+        """
+        self._check_cuda()
+        if not _CUDA_READY:
+            raise RuntimeError("CUDA is not available on this system.")
+
+        width, height = initial_grid.shape
+        bw, bh = self.block_size
+        threads_per_block = (bw, bh)
+        blocks_per_grid = (math.ceil(width / bw), math.ceil(height / bh))
+
+        kernel = _kernel_wrap if self.edge_behavior == EdgeBehavior.WRAP_AROUND.value else _kernel_dead_edges
+
+        d_current = cuda.to_device(np.ascontiguousarray(initial_grid, dtype=np.uint8))
+        d_next = cuda.device_array_like(d_current)
+
+        for gen in range(1, iterations + 1):
+            cuda.synchronize()
+            step_start = time.perf_counter()
+
+            kernel[blocks_per_grid, threads_per_block](d_current, d_next, width, height)
+            cuda.synchronize()
+
+            step_ms = (time.perf_counter() - step_start) * 1000.0
+
+            d_current, d_next = d_next, d_current
+
+            # Copy back to host for live display
+            host_grid = d_current.copy_to_host()
+            yield gen, host_grid, step_ms
+
+    @staticmethod
+    def get_gpu_info() -> dict:
+        """
+        Return a dict with GPU device name, CUDA version, and VRAM.
+        Returns empty/fallback strings when CUDA is not available.
+        """
+        info = {"gpu_name": "N/A", "cuda_version": "N/A", "vram_bytes": 0}
+        try:
+            from numba import cuda as _cuda
+            if _cuda.is_available():
+                device = _cuda.get_current_device()
+                info["gpu_name"] = device.name.decode() if isinstance(device.name, bytes) else str(device.name)
+                # CUDA compute capability
+                cc = device.compute_capability
+                info["cuda_version"] = f"Compute {cc[0]}.{cc[1]}"
+                # Total memory
+                ctx = device.primary_context
+                meminfo = _cuda.current_context().get_memory_info()
+                info["vram_bytes"] = meminfo.total
+        except Exception:
+            pass
+        return info
