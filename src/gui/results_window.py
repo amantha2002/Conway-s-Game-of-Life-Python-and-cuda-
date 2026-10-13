@@ -408,33 +408,79 @@ class ResultsWindow:
         )
         self.btn_unit_s.pack(side="left")
 
-        self.fig = Figure(figsize=(9.5, 2.7), dpi=100, facecolor=BG_CARD)
+        self.fig = Figure(figsize=(9.5, 3.2), dpi=100, facecolor=BG_CARD)
+        self.fig.subplots_adjust(left=0.09, right=0.96, top=0.90, bottom=0.24)
         self.ax = self.fig.add_subplot(111)
         self._style_axes()
 
         self.fig_canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
-        self.fig_canvas.get_tk_widget().pack(fill="x", padx=8, pady=(4, 8))
+        self.fig_canvas.get_tk_widget().pack(fill="x", padx=8, pady=(4, 10))
+
+    def _format_time_val(self, ms_val: Optional[float]) -> str:
+        """Format a millisecond compute duration according to currently selected time unit."""
+        if ms_val is None:
+            return "N/A"
+        if self.time_unit == "s":
+            return f"{ms_val / 1000.0:.4f} S"
+        return f"{ms_val:.2f} mS"
+
+    def _sync_canvas_time_labels(self):
+        """Keep the canvas header labels synchronized with the current time unit and compute values."""
+        if self.cpu_finished:
+            cum_ms = sum(self.cpu_step_times)
+            t_str = self._format_time_val(cum_ms)
+            self.lbl_cpu_gen.config(
+                text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}) ✅",
+                fg="#38bdf8"
+            )
+        elif self.cpu_current_gen > 0 and self.cpu_step_times:
+            cum_ms = sum(self.cpu_step_times)
+            last_ms = self.cpu_step_times[-1]
+            t_str = self._format_time_val(cum_ms)
+            self.lbl_cpu_gen.config(
+                text=f"Gen: {self.cpu_current_gen}/{self.config.iterations}  |  {t_str}  ({last_ms:.2f} ms/step)",
+                fg=GRAPH_CPU
+            )
+
+        if not self.has_hardware_cuda:
+            self.lbl_gpu_gen.config(text="❌ No CUDA found on this machine", fg="#ef4444")
+        elif self.gpu_finished:
+            cum_ms = sum(self.gpu_step_times)
+            t_str = self._format_time_val(cum_ms)
+            self.lbl_gpu_gen.config(
+                text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}! 🚀)",
+                fg="#10b981"
+            )
+        elif self.gpu_current_gen > 0 and self.gpu_step_times:
+            cum_ms = sum(self.gpu_step_times)
+            last_ms = self.gpu_step_times[-1]
+            t_str = self._format_time_val(cum_ms)
+            self.lbl_gpu_gen.config(
+                text=f"Gen: {self.gpu_current_gen}/{self.config.iterations}  |  {t_str}  ({last_ms:.2f} ms/step)",
+                fg=GRAPH_GPU
+            )
 
     def _style_axes(self):
-        """Apply dark theme styling to matplotlib plot axes."""
+        """Apply dark theme styling to matplotlib plot axes with generous bottom margin so X label is never covered."""
+        self.fig.subplots_adjust(left=0.09, right=0.96, top=0.90, bottom=0.24)
         self.ax.set_facecolor(BG_PANEL)
-        x_unit_str = "s" if self.time_unit == "s" else "ms"
+        x_unit_str = "S" if self.time_unit == "s" else "mS"
         y_unit_str = "iter/s" if self.time_unit == "s" else "iter/ms"
 
         if self.graph_mode == "rate":
-            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=8, color=TEXT_SECONDARY)
-            self.ax.set_ylabel(f"Iterations / Unit Time ({y_unit_str})", fontsize=8, color=TEXT_SECONDARY)
+            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=9, fontweight="bold", color="#e2e8f0", labelpad=6)
+            self.ax.set_ylabel(f"Iterations / Unit Time ({y_unit_str})", fontsize=9, fontweight="bold", color="#e2e8f0", labelpad=6)
         else:
-            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=8, color=TEXT_SECONDARY)
-            self.ax.set_ylabel("Iterations Completed", fontsize=8, color=TEXT_SECONDARY)
+            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=9, fontweight="bold", color="#e2e8f0", labelpad=6)
+            self.ax.set_ylabel("Iterations Completed", fontsize=9, fontweight="bold", color="#e2e8f0", labelpad=6)
 
-        self.ax.tick_params(colors=TEXT_SECONDARY, labelsize=7)
+        self.ax.tick_params(colors=TEXT_SECONDARY, labelsize=8)
         for spine in self.ax.spines.values():
             spine.set_color(BORDER_COLOR)
         self.ax.grid(True, color=BORDER_COLOR, alpha=0.35, linewidth=0.5)
 
     def _set_time_unit(self, unit: str):
-        """Switch graph time unit between 'ms' and 's' and redraw."""
+        """Switch graph time unit between 'ms' and 's', update canvas headers and redraw."""
         self.time_unit = unit
         if unit == "ms":
             self.btn_unit_ms.config(bg="#0284c7", fg="#ffffff")
@@ -442,6 +488,9 @@ class ResultsWindow:
         else:
             self.btn_unit_s.config(bg="#0284c7", fg="#ffffff")
             self.btn_unit_ms.config(bg=BTN_BG, fg=TEXT_SECONDARY)
+        self._sync_canvas_time_labels()
+        if self.is_finished:
+            self._populate_stats_table()
         self._update_graph()
 
     def _on_graph_mode_changed(self):
@@ -725,7 +774,7 @@ class ResultsWindow:
             initial = self.initial_grid.copy()
             gen_iter = engine.run_stepwise(initial, self.config.iterations)
 
-            total_start = time.perf_counter()
+            pure_compute_sec = 0.0
             for step_idx in range(1, self.config.iterations + 1):
                 while self.is_paused and not self._stop_event.is_set():
                     time.sleep(0.04)
@@ -733,14 +782,14 @@ class ResultsWindow:
                     return
 
                 _, grid, ms = next(gen_iter)
+                pure_compute_sec += (ms / 1000.0)
                 self._queue.put(("cpu_step", step_idx, grid, ms))
 
                 # Normal CPU visual animation pacing (e.g. 30ms per generation)
                 if self.animation_delay_ms > 0:
                     time.sleep(self.animation_delay_ms / 1000.0)
 
-            total_sec = time.perf_counter() - total_start
-            self._queue.put(("cpu_done", total_sec))
+            self._queue.put(("cpu_done", pure_compute_sec))
         except Exception as e:
             self._queue.put(("error", f"Normal CPU Engine Error: {str(e)}"))
 
@@ -759,7 +808,7 @@ class ResultsWindow:
             initial = self.initial_grid.copy()
             gen_iter = engine.run_stepwise(initial, self.config.iterations)
 
-            total_start = time.perf_counter()
+            pure_gpu_kernel_sec = 0.0
             for step_idx in range(1, self.config.iterations + 1):
                 while self.is_paused and not self._stop_event.is_set():
                     time.sleep(0.04)
@@ -767,6 +816,7 @@ class ResultsWindow:
                     return
 
                 _, grid, ms = next(gen_iter)
+                pure_gpu_kernel_sec += (ms / 1000.0)
                 self._queue.put(("gpu_step", step_idx, grid, ms))
 
                 # GPU animation pacing: CUDA runs vastly faster than CPU!
@@ -775,12 +825,11 @@ class ResultsWindow:
                     gpu_delay_sec = max(0.002, (self.animation_delay_ms / 1000.0) / 12.0)
                     time.sleep(gpu_delay_sec)
 
-            kernel_sec = time.perf_counter() - total_start
             bytes_transferred = self.config.grid_size * self.config.grid_size * 2
             transfer_ms = max(0.18, (bytes_transferred / (1024 * 1024)) * 0.5 + 0.15)
             transfer_sec = transfer_ms / 1000.0
 
-            self._queue.put(("gpu_done", kernel_sec, transfer_sec))
+            self._queue.put(("gpu_done", pure_gpu_kernel_sec, transfer_sec))
         except Exception as e:
             self._queue.put(("error", f"CUDA GPU Engine Error: {str(e)}"))
 
@@ -792,8 +841,10 @@ class ResultsWindow:
         self.cpu_step_times.append(ms)
         self.cpu_current_grid = grid
         self._render_grid(self.cpu_canvas, grid, "cpu")
+        cum_ms = sum(self.cpu_step_times)
+        t_str = self._format_time_val(cum_ms)
         self.lbl_cpu_gen.config(
-            text=f"Gen: {gen} / {self.config.iterations}  |  {ms:.2f} ms/step",
+            text=f"Gen: {gen} / {self.config.iterations}  |  {t_str}  ({ms:.2f} ms/step)",
             fg=GRAPH_CPU
         )
         self._update_progress_display()
@@ -810,8 +861,10 @@ class ResultsWindow:
         self.gpu_step_times.append(ms)
         self.gpu_current_grid = grid
         self._render_grid(self.gpu_canvas, grid, "gpu")
+        cum_ms = sum(self.gpu_step_times)
+        t_str = self._format_time_val(cum_ms)
         self.lbl_gpu_gen.config(
-            text=f"Gen: {gen} / {self.config.iterations}  |  {ms:.2f} ms/step",
+            text=f"Gen: {gen} / {self.config.iterations}  |  {t_str}  ({ms:.2f} ms/step)",
             fg=GRAPH_GPU
         )
         self._update_progress_display()
@@ -825,8 +878,10 @@ class ResultsWindow:
         self.cpu_finished = True
         self.cpu_total_time_sec = total_sec
         self.result.cpu_time_sec = total_sec
+        cum_ms = sum(self.cpu_step_times)
+        t_str = self._format_time_val(cum_ms)
         self.lbl_cpu_gen.config(
-            text=f"Gen: {self.config.iterations} (COMPLETED in {total_sec*1000.0:.1f} ms) ✅",
+            text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}) ✅",
             fg="#38bdf8"
         )
         self._update_progress_display()
@@ -840,8 +895,10 @@ class ResultsWindow:
         self.result.cuda_kernel_time_sec = kernel_sec
         self.result.gpu_transfer_time_sec = transfer_sec
         self.result.cuda_total_time_sec = kernel_sec + transfer_sec
+        cum_ms = sum(self.gpu_step_times)
+        t_str = self._format_time_val(cum_ms)
         self.lbl_gpu_gen.config(
-            text=f"Gen: {self.config.iterations} (COMPLETED in {kernel_sec*1000.0:.1f} ms! 🚀)",
+            text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}! 🚀)",
             fg="#10b981"
         )
         self._update_progress_display()
@@ -983,15 +1040,25 @@ class ResultsWindow:
             max_y = 1.0
 
             if x_cpu and y_cpu:
-                avg_c = sum(y_cpu) / len(y_cpu)
-                lbl_c = f"CPU (Python): avg {avg_c:,.1f} {u_str}" if self.graph_mode == "rate" else f"CPU ({len(x_cpu)} iters)"
+                total_c_ms = sum(self.cpu_step_times)
+                t_c_str = self._format_time_val(total_c_ms)
+                if self.graph_mode == "rate":
+                    avg_c = sum(y_cpu) / len(y_cpu)
+                    lbl_c = f"CPU: {t_c_str} (avg {avg_c:,.1f} {u_str})"
+                else:
+                    lbl_c = f"CPU: {t_c_str} ({len(x_cpu)} iters)"
                 self.ax.plot(x_cpu, y_cpu, color=GRAPH_CPU, linewidth=1.8, label=lbl_c, alpha=0.95)
                 max_x = max(max_x, max(x_cpu))
                 max_y = max(max_y, max(y_cpu))
 
             if x_gpu and y_gpu and self.has_hardware_cuda:
-                avg_g = sum(y_gpu) / len(y_gpu)
-                lbl_g = f"CUDA (GPU): avg {avg_g:,.1f} {u_str}" if self.graph_mode == "rate" else f"CUDA ({len(x_gpu)} iters)"
+                total_g_ms = sum(self.gpu_step_times)
+                t_g_str = self._format_time_val(total_g_ms)
+                if self.graph_mode == "rate":
+                    avg_g = sum(y_gpu) / len(y_gpu)
+                    lbl_g = f"CUDA: {t_g_str} (avg {avg_g:,.1f} {u_str})"
+                else:
+                    lbl_g = f"CUDA: {t_g_str} ({len(x_gpu)} iters)"
                 self.ax.plot(x_gpu, y_gpu, color=GRAPH_GPU, linewidth=1.8, label=lbl_g, alpha=0.95)
                 max_x = max(max_x, max(x_gpu))
                 max_y = max(max_y, max(y_gpu))
@@ -1057,14 +1124,17 @@ class ResultsWindow:
             match_str = "  |  Grids: Match ✅" if r.grids_match else ""
             cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
             gpu_ms = (r.cuda_kernel_time_sec or 0.0) * 1000.0
+            cpu_t_str = self._format_time_val(cpu_ms)
+            gpu_t_str = self._format_time_val(gpu_ms)
             self.lbl_status.config(
-                text=f"✅ Finished! CPU: {cpu_ms:.1f} ms  |  CUDA: {gpu_ms:.1f} ms{speedup_str}{match_str}",
+                text=f"✅ Finished! CPU: {cpu_t_str}  |  CUDA: {gpu_t_str}{speedup_str}{match_str}",
                 fg=ACCENT_GREEN
             )
         else:
             cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
+            cpu_t_str = self._format_time_val(cpu_ms)
             self.lbl_status.config(
-                text=f"✅ Finished Normal CPU in {cpu_ms:.1f} ms (No CUDA found on this machine)",
+                text=f"✅ Finished Normal CPU in {cpu_t_str} (No CUDA found on this machine)",
                 fg=ACCENT_GREEN
             )
 
@@ -1081,18 +1151,6 @@ class ResultsWindow:
     def _populate_stats_table(self):
         """
         Fill the 11 rows of the Benchmark Statistics table with computed values.
-        Rows:
-          1. Total time
-          2. Average ms/generation
-          3. Min / Max ms/generation
-          4. Throughput (cells/sec)
-          5. Speedup
-          6. GPU transfer time
-          7. GPU kernel time
-          8. Memory used
-          9. Final alive cells
-          10. Results match?
-          11. Hardware info
         """
         r = self.result
         n_gens = r.iterations
@@ -1109,10 +1167,12 @@ class ResultsWindow:
         # 1. Total time
         cpu_total_ms = (r.cpu_time_sec * 1000.0) if r.cpu_time_sec is not None else None
         gpu_total_ms = (r.cuda_kernel_time_sec * 1000.0) if r.cuda_kernel_time_sec is not None else None
+        cpu_t_disp = self._format_time_val(cpu_total_ms) if cpu_total_ms is not None else "N/A"
+        gpu_t_disp = self._format_time_val(gpu_total_ms) if gpu_total_ms is not None else "N/A"
         _update_row(
             "total_time",
-            _safe_fmt(cpu_total_ms, ".2f", " ms"),
-            _safe_fmt(gpu_total_ms, ".2f", " ms"),
+            cpu_t_disp,
+            gpu_t_disp,
             f"Whole run, {n_gens} generations",
             "Main result"
         )
@@ -1218,6 +1278,7 @@ class ResultsWindow:
         self.gpu_step_times.clear()
         self.cpu_current_grid = None
         self.gpu_current_grid = None
+        self._last_graph_update = 0.0
 
         self.result = BenchmarkResult(
             grid_size=self.config.grid_size,
