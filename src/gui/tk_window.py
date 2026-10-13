@@ -3,6 +3,7 @@ Tkinter Native Desktop Settings & Preview Window for Conway's Game of Life.
 Contains top settings panel, real-time preview canvas below, and a Run button.
 """
 
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, Optional
@@ -22,6 +23,7 @@ from src.config import (
 from src.patterns import create_initial_grid, PATTERN_NAMES
 from src.preview import render_preview_image
 from src.benchmark import run_benchmark
+from src.cuda_engine import CUDAEngine
 from src.gui.results_window import ResultsWindow
 
 
@@ -35,23 +37,26 @@ class GameOfLifeSettingsWindow:
     ):
         self.root = root if root is not None else tk.Tk()
         self.root.title("Conway's Game of Life — HPC Settings & Preview")
-        self.root.geometry("640x780")
-        self.root.minsize(580, 720)
+        self.root.geometry("660x860")
+        self.root.minsize(600, 760)
         self.root.configure(bg="#121316")
 
         self.on_run_callback = on_run_callback
         self.current_grid: Optional[np.ndarray] = None
         self.photo_img: Optional[ImageTk.PhotoImage] = None
+        self._last_cuda_diag = None
 
         # Build UI
         self._init_styles()
         self._build_header()
+        self._build_cuda_status_panel()
         self._build_settings_panel()
         self._build_preview_panel()
         self._build_action_panel()
 
-        # Initial preview rendering
+        # Initial preview rendering & automatic initial CUDA detection
         self.update_preview()
+        self._on_check_cuda_click()
 
     def _init_styles(self):
         style = ttk.Style()
@@ -83,6 +88,164 @@ class GameOfLifeSettingsWindow:
             style="Subheader.TLabel"
         )
         subtitle.pack(anchor="w")
+
+    def _build_cuda_status_panel(self):
+        """Card containing the 'Check CUDA Available' button and live status display."""
+        cuda_card = ttk.LabelFrame(
+            self.root, text=" ⚡ CUDA Hardware Acceleration ", style="Section.TLabelframe", padding=10
+        )
+        cuda_card.pack(fill="x", padx=16, pady=(4, 6))
+
+        content = tk.Frame(cuda_card, bg="#18191e")
+        content.pack(fill="x")
+        content.columnconfigure(0, weight=0)
+        content.columnconfigure(1, weight=1)
+        content.columnconfigure(2, weight=0)
+
+        # 1. Action Button: Check CUDA Available
+        self.btn_check_cuda = tk.Button(
+            content,
+            text="Check CUDA Available",
+            font=("Segoe UI", 9, "bold"),
+            bg="#1e293b",
+            fg="#f8fafc",
+            activebackground="#334155",
+            activeforeground="#38bdf8",
+            relief="flat",
+            cursor="hand2",
+            padx=12,
+            pady=6,
+            command=self._on_check_cuda_click
+        )
+        self.btn_check_cuda.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
+
+        # 2. Main Status Label (CUDA is available in green / No CUDA found in red)
+        self.lbl_cuda_status = tk.Label(
+            content,
+            text="Checking CUDA status...",
+            font=("Segoe UI", 11, "bold"),
+            fg="#94a3b8",
+            bg="#18191e"
+        )
+        self.lbl_cuda_status.grid(row=0, column=1, sticky="w")
+
+        # 3. Sub-detail Label
+        self.lbl_cuda_details = tk.Label(
+            content,
+            text="Click 'Check CUDA Available' to probe hardware.",
+            font=("Segoe UI", 8),
+            fg="#64748b",
+            bg="#18191e"
+        )
+        self.lbl_cuda_details.grid(row=1, column=1, sticky="w", pady=(2, 0))
+
+        # 4. Info Modal Button
+        self.btn_cuda_info = tk.Button(
+            content,
+            text="Specs",
+            font=("Segoe UI", 8, "bold"),
+            bg="#1e293b",
+            fg="#38bdf8",
+            activebackground="#334155",
+            activeforeground="#38bdf8",
+            relief="flat",
+            cursor="hand2",
+            padx=8,
+            pady=3,
+            command=self._show_cuda_details_modal
+        )
+        self.btn_cuda_info.grid(row=0, column=2, rowspan=2, padx=(8, 0), sticky="e")
+        self.btn_cuda_info.grid_remove()
+
+    def _on_check_cuda_click(self):
+        """Probe CUDA hardware and update status."""
+        self.lbl_cuda_status.config(text="Probing CUDA hardware & drivers...", fg="#38bdf8")
+        self.lbl_cuda_details.config(text="Querying NVIDIA Driver & runtime APIs...", fg="#94a3b8")
+        self.btn_check_cuda.config(state="disabled")
+        self.root.update_idletasks()
+
+        def _do_check():
+            try:
+                diag = CUDAEngine.check_cuda_detailed()
+                self._apply_cuda_diag(diag)
+            except Exception as e:
+                self.lbl_cuda_status.config(text="No CUDA found", fg="#ef4444")
+                self.lbl_cuda_details.config(text=f"Check error: {e}", fg="#fca5a5")
+            finally:
+                self.btn_check_cuda.config(state="normal")
+
+        self.root.after(20, _do_check)
+
+    def _apply_cuda_diag(self, diag: dict):
+        self.btn_check_cuda.config(state="normal")
+        self._last_cuda_diag = diag
+
+        if diag["is_available"]:
+            # GREEN COLOR as requested: "CUDA is available"
+            self.lbl_cuda_status.config(
+                text="CUDA is available",
+                fg="#22c55e"  # Vibrant green
+            )
+            sub = f"{diag['gpu_name']}  |  Compute {diag['compute_capability']}  |  {diag['vram_mb'] / 1024:.1f} GB VRAM  |  CUDA {diag['driver_version']}"
+            self.lbl_cuda_details.config(text=sub, fg="#a7f3d0")
+            self.btn_cuda_info.grid()
+        else:
+            # RED COLOR as requested: "No CUDA found"
+            self.lbl_cuda_status.config(
+                text="No CUDA found",
+                fg="#ef4444"  # Vibrant red
+            )
+            self.lbl_cuda_details.config(
+                text="No NVIDIA GPU or CUDA driver detected on this system.",
+                fg="#fca5a5"
+            )
+            self.btn_cuda_info.grid_remove()
+
+    def _show_cuda_details_modal(self):
+        """Show full CUDA diagnostic details in a sleek modal dialog."""
+        diag = self._last_cuda_diag or CUDAEngine.check_cuda_detailed()
+        top = tk.Toplevel(self.root)
+        top.title("CUDA Hardware Diagnostics")
+        top.geometry("460x360")
+        top.configure(bg="#121316")
+        top.resizable(False, False)
+        top.transient(self.root)
+        top.grab_set()
+
+        tk.Label(
+            top, text="⚡ CUDA Hardware & Driver Profile",
+            font=("Segoe UI", 12, "bold"), fg="#38bdf8", bg="#121316"
+        ).pack(pady=(16, 8))
+
+        card = tk.Frame(top, bg="#18191e", highlightbackground="#2a2d3e", highlightthickness=1)
+        card.pack(fill="both", expand=True, padx=16, pady=8)
+
+        status_text = "CUDA is available" if diag["is_available"] else "No CUDA found"
+        status_color = "#22c55e" if diag["is_available"] else "#ef4444"
+
+        items = [
+            ("Status", status_text, status_color),
+            ("Device Name", diag.get("gpu_name", "N/A"), "#f8fafc"),
+            ("Compute Capability", diag.get("compute_capability", "N/A"), "#38bdf8"),
+            ("Total VRAM", f"{diag.get('vram_mb', 0)/1024:.2f} GB ({diag.get('vram_mb', 0):.0f} MB)", "#f8fafc"),
+            ("CUDA Driver Version", diag.get("driver_version", "N/A"), "#f8fafc"),
+            ("Device Count", str(diag.get("device_count", 0)), "#f8fafc"),
+            ("JIT Kernel Compiler", "Ready (Numba CUDA)" if diag.get("jit_ready") else "Driver Ready (Active)", "#a7f3d0"),
+            ("Recommended Block", "16×16 (256 threads/block)", "#fb923c"),
+        ]
+
+        for label, val, color in items:
+            row = tk.Frame(card, bg="#18191e")
+            row.pack(fill="x", padx=12, pady=3)
+            tk.Label(row, text=f"{label}:", font=("Segoe UI", 9, "bold"), fg="#94a3b8", bg="#18191e", width=22, anchor="w").pack(side="left")
+            tk.Label(row, text=val, font=("Segoe UI", 9), fg=color, bg="#18191e", anchor="w").pack(side="left")
+
+        tk.Button(
+            top, text="Close", font=("Segoe UI", 9, "bold"),
+            bg="#1e293b", fg="#f8fafc", activebackground="#334155",
+            relief="flat", cursor="hand2", padx=18, pady=4,
+            command=top.destroy
+        ).pack(pady=(4, 12))
 
     def _build_settings_panel(self):
         """Top snippet: Settings frame containing all required controls."""
