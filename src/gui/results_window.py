@@ -11,6 +11,7 @@ Shows:
 
 import csv
 import math
+import os
 import platform
 import queue
 import threading
@@ -685,7 +686,7 @@ class ResultsWindow:
         self.btn_csv = tk.Button(btn_frame, text="📄  Export CSV", command=self._export_csv, **btn_style)
         self.btn_csv.pack(side="left", padx=(0, 8))
 
-        self.btn_save = tk.Button(btn_frame, text="💾  Save Graphs", command=self._save_graphs, **btn_style)
+        self.btn_save = tk.Button(btn_frame, text="💾  Save Images (Graph + Table)", command=self._save_graphs, **btn_style)
         self.btn_save.pack(side="left")
 
         # Status label
@@ -1545,27 +1546,149 @@ class ResultsWindow:
             messagebox.showerror("Export Error", f"Failed to save CSV:\n{e}", parent=self.win)
 
     def _save_graphs(self):
-        """Export the matplotlib performance graph as a high-resolution PNG image."""
+        """
+        Export both the performance graph image and the benchmark statistics table image.
+        Saves two coordinated high-resolution PNG images: <name>_graph.png and <name>_table.png.
+        """
         if not self.cpu_step_times and not self.gpu_step_times:
-            messagebox.showwarning("Save Graphs", "No graph data recorded yet.", parent=self.win)
+            messagebox.showwarning(
+                "Save Images",
+                "No simulation data recorded yet. Please run the simulation first.",
+                parent=self.win
+            )
             return
+
+        actual_gens = self.result.iterations or len(self.cpu_step_times)
+        initial_filename = f"gol_benchmark_{self.config.grid_size}x{self.config.grid_size}_{actual_gens}gens.png"
 
         filepath = filedialog.asksaveasfilename(
             parent=self.win,
-            title="Save Performance Graph",
+            title="Save Graph & Table Images (Saves both _graph.png and _table.png)",
             defaultextension=".png",
             filetypes=[("PNG Image", "*.png"), ("All files", "*.*")],
-            initialfile=f"gol_performance_graph_{self.config.grid_size}x{self.config.grid_size}.png"
+            initialfile=initial_filename
         )
         if not filepath:
             return
 
         try:
-            self.fig.savefig(filepath, dpi=200, bbox_inches="tight", facecolor=BG_CARD)
-            self.lbl_status.config(text=f"💾 Graph saved: {filepath}", fg=ACCENT_GREEN)
-            messagebox.showinfo("Save Graph", f"Graph image saved successfully to:\n{filepath}", parent=self.win)
+            dirname, filename = os.path.split(filepath)
+            base_name, ext = os.path.splitext(filename)
+            if not ext:
+                ext = ".png"
+
+            # Strip existing suffix if user typed it
+            for suffix in ("_graph", "_table", "_performance", "_stats"):
+                if base_name.endswith(suffix):
+                    base_name = base_name[:-len(suffix)]
+                    break
+
+            graph_filename = f"{base_name}_graph{ext}"
+            table_filename = f"{base_name}_table{ext}"
+            graph_filepath = os.path.join(dirname, graph_filename)
+            table_filepath = os.path.join(dirname, table_filename)
+
+            # 1. Save Graph Image
+            self.fig.savefig(graph_filepath, dpi=200, bbox_inches="tight", facecolor=BG_CARD)
+
+            # 2. Render and Save Benchmark Statistics Table Image
+            self._render_table_image(table_filepath)
+
+            self.lbl_status.config(
+                text=f"💾 Saved: {graph_filename} & {table_filename}",
+                fg=ACCENT_GREEN
+            )
+            messagebox.showinfo(
+                "Images Saved Successfully",
+                f"Both benchmark images have been saved successfully:\n\n"
+                f"📈 Graph Image:\n{graph_filepath}\n\n"
+                f"📋 Table Image:\n{table_filepath}",
+                parent=self.win
+            )
         except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save graph:\n{e}", parent=self.win)
+            messagebox.showerror("Save Error", f"Failed to save images:\n{e}", parent=self.win)
+
+    def _render_table_image(self, filepath: str):
+        """
+        Render the 11-row benchmark statistics table as a high-resolution dark-themed PNG image.
+        Uses pure Matplotlib offscreen rendering for crisp, publication-quality output.
+        """
+        actual_gens = self.result.iterations or len(self.cpu_step_times)
+        mode_info = self.config.run_mode
+        if not self.has_hardware_cuda:
+            mode_info = "Normal CPU (No CUDA found)"
+        elif self.was_manually_stopped:
+            mode_info += " (Stopped early)"
+
+        fig = Figure(figsize=(11.5, 6.2), dpi=200, facecolor=BG_DARK)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.set_facecolor(BG_DARK)
+
+        fig.text(
+            0.5, 0.94,
+            "Conway's Game of Life — Benchmark Statistics & Metrics",
+            ha="center", va="top", fontsize=13, fontweight="bold", color=ACCENT_CYAN
+        )
+        fig.text(
+            0.5, 0.89,
+            f"Grid: {self.config.grid_size}×{self.config.grid_size}  |  "
+            f"Generations: {actual_gens}  |  "
+            f"Pattern: {self.config.pattern}  |  "
+            f"Mode: {mode_info}",
+            ha="center", va="top", fontsize=9, color=TEXT_SECONDARY
+        )
+
+        def _clean_cell(val):
+            if not isinstance(val, str):
+                return str(val)
+            s = val.replace("✅", "[Match]").replace("❌", "[Mismatch]")
+            s = s.replace("🚀", "").replace("⏹", "[Stopped]").replace("—", "--")
+            s = s.replace("↔️", "<->").replace("↔", "<->").replace("⚡", "").replace("📋", "")
+            return " ".join(s.split())
+
+        headers = ["Metric", "CPU (Python)", "CUDA (GPU)", "Scope / Calculation", "Purpose / Notes"]
+        cell_data = []
+        for row_data in self._metric_rows:
+            iid_key = row_data[0]
+            iid = self._tree_iids.get(iid_key)
+            if iid:
+                raw_row = list(self.tree.item(iid, "values"))
+            else:
+                raw_row = list(row_data[1:])
+            cell_data.append([_clean_cell(c) for c in raw_row])
+
+        col_widths = [0.18, 0.15, 0.15, 0.28, 0.24]
+        table = ax.table(
+            cellText=cell_data,
+            colLabels=headers,
+            colWidths=col_widths,
+            cellLoc="left",
+            loc="center",
+            bbox=[0.02, 0.04, 0.96, 0.80]
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(8.5)
+
+        for (row, col), cell in table.get_celld().items():
+            cell.set_edgecolor(BORDER_COLOR)
+            cell.set_linewidth(0.8)
+            if row == 0:
+                cell.set_facecolor("#1e293b")
+                cell.set_text_props(color=ACCENT_CYAN, fontweight="bold")
+            else:
+                bg_col = BG_PANEL if row % 2 == 0 else BG_CARD
+                cell.set_facecolor(bg_col)
+                if col == 0:
+                    cell.set_text_props(color=TEXT_PRIMARY, fontweight="bold")
+                elif col == 1:
+                    cell.set_text_props(color=GRAPH_CPU)
+                elif col == 2:
+                    cell.set_text_props(color=GRAPH_GPU, fontweight="bold")
+                else:
+                    cell.set_text_props(color=TEXT_SECONDARY)
+
+        fig.savefig(filepath, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
 
     def _on_close(self):
         """Clean up threads, polling jobs, and bindings when closing."""
