@@ -5,7 +5,7 @@ Includes high-performance vectorized NumPy execution and per-step stepping.
 """
 
 import time
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
 from src.config import EdgeBehavior
 
@@ -81,16 +81,20 @@ class CPUEngine:
 
         return current_grid, elapsed_time
 
-    def run_stepwise(self, initial_grid: np.ndarray, iterations: int):
+    def run_stepwise(self, initial_grid: np.ndarray, iterations: Optional[int] = None):
         """
         Generator that yields timing data after each generation step.
+        If iterations is None or <= 0, runs indefinitely until stopped.
 
         Yields:
             Tuple[int, np.ndarray, float]: (generation_number, grid_snapshot, step_time_ms)
         """
         current_grid = initial_grid.copy()
-
-        for gen in range(1, iterations + 1):
+        gen = 0
+        while True:
+            gen += 1
+            if iterations is not None and iterations > 0 and gen > iterations:
+                break
             step_start = time.perf_counter()
             current_grid = self.step(current_grid)
             step_ms = (time.perf_counter() - step_start) * 1000.0

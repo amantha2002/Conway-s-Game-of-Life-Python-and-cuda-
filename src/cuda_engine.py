@@ -323,9 +323,10 @@ class CUDAEngine:
         final_grid, _, _ = self.run(grid, iterations=1)
         return final_grid
 
-    def run_stepwise(self, initial_grid: np.ndarray, iterations: int):
+    def run_stepwise(self, initial_grid: np.ndarray, iterations: Optional[int] = None):
         """
         Generator that yields timing data after each generation step on GPU.
+        If iterations is None or <= 0, runs indefinitely until stopped.
 
         Yields:
             Tuple[int, np.ndarray, float]: (generation_number, grid_snapshot, step_time_ms)
@@ -334,7 +335,11 @@ class CUDAEngine:
 
         if self.is_emulated:
             current = initial_grid.copy()
-            for gen in range(1, iterations + 1):
+            gen = 0
+            while True:
+                gen += 1
+                if iterations is not None and iterations > 0 and gen > iterations:
+                    break
                 t0 = time.perf_counter()
                 current = self._emulate_step(current)
                 raw_ms = (time.perf_counter() - t0) * 1000.0
@@ -356,7 +361,11 @@ class CUDAEngine:
         d_current = cuda.to_device(np.ascontiguousarray(initial_grid, dtype=np.uint8))
         d_next = cuda.device_array_like(d_current)
 
-        for gen in range(1, iterations + 1):
+        gen = 0
+        while True:
+            gen += 1
+            if iterations is not None and iterations > 0 and gen > iterations:
+                break
             cuda.synchronize()
             step_start = time.perf_counter()
 

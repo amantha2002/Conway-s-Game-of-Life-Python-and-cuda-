@@ -53,6 +53,7 @@ class SimulationConfig:
     """Holds all simulation parameters and runtime settings."""
     grid_size: int = 128
     iterations: int = 100
+    is_unlimited: bool = False
     pattern: str = PatternType.RANDOM.value
     random_density: float = 0.25  # 10% to 50%
     random_seed: int = 42
@@ -66,7 +67,7 @@ class SimulationConfig:
         """Validate configuration values against constraints."""
         if self.grid_size not in AVAILABLE_GRID_SIZES:
             raise ValueError(f"grid_size must be one of {AVAILABLE_GRID_SIZES}, got {self.grid_size}")
-        if self.iterations < 1:
+        if not self.is_unlimited and self.iterations < 1:
             raise ValueError(f"iterations must be >= 1, got {self.iterations}")
         if not (0.05 <= self.random_density <= 0.90):
             raise ValueError(f"random_density should be between 0.05 and 0.90, got {self.random_density}")

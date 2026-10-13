@@ -384,10 +384,33 @@ class GameOfLifeSettingsWindow:
         # Iterations
         f_iter = tk.Frame(settings_frame, bg="#18191e")
         f_iter.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
-        ttk.Label(f_iter, text="Iterations:").pack(anchor="w")
+
+        iter_hdr = tk.Frame(f_iter, bg="#18191e")
+        iter_hdr.pack(fill="x")
+        ttk.Label(iter_hdr, text="Iterations:").pack(side="left")
+
+        self.var_unlimited = tk.BooleanVar(value=False)
+        self.chk_unlimited = tk.Checkbutton(
+            iter_hdr,
+            text="♾️ Unlimited",
+            variable=self.var_unlimited,
+            command=self._on_unlimited_toggle,
+            bg="#18191e",
+            fg="#38bdf8",
+            activebackground="#18191e",
+            activeforeground="#38bdf8",
+            selectcolor="#121316",
+            font=("Segoe UI", 8, "bold"),
+            relief="flat",
+            cursor="hand2",
+            padx=2,
+            pady=0
+        )
+        self.chk_unlimited.pack(side="right")
+
         self.var_iterations = tk.IntVar(value=100)
         self.sp_iterations = tk.Spinbox(
-            f_iter, from_=1, to=10000, textvariable=self.var_iterations,
+            f_iter, from_=1, to=100000, textvariable=self.var_iterations,
             bg="#1e2026", fg="#f8fafc", insertbackground="white", width=12
         )
         self.sp_iterations.pack(fill="x", pady=2)
@@ -551,11 +574,25 @@ class GameOfLifeSettingsWindow:
         )
         self.lbl_run_status.pack(anchor="w", pady=2)
 
+    def _on_unlimited_toggle(self):
+        """Toggle Spinbox state when Unlimited checkbox is clicked."""
+        if self.var_unlimited.get():
+            self.sp_iterations.config(state="disabled")
+        else:
+            self.sp_iterations.config(state="normal")
+
     def get_config(self) -> SimulationConfig:
         """Read and validate current UI values into SimulationConfig."""
+        is_unlimited = bool(self.var_unlimited.get())
+        try:
+            iters_val = int(self.var_iterations.get())
+        except (ValueError, tk.TclError):
+            iters_val = 100
+
         cfg = SimulationConfig(
             grid_size=int(self.var_grid_size.get()),
-            iterations=int(self.var_iterations.get()),
+            iterations=0 if is_unlimited else max(1, iters_val),
+            is_unlimited=is_unlimited,
             pattern=self.var_pattern.get(),
             random_density=float(self.var_density.get()) / 100.0,
             random_seed=int(self.var_seed.get()),
@@ -597,8 +634,9 @@ class GameOfLifeSettingsWindow:
     def _on_run_click(self):
         """Triggered when the user clicks the Run button in the settings window."""
         config = self.get_config()
+        iters_desc = "Unlimited (∞)" if config.is_unlimited else f"{config.iterations} steps"
         self.lbl_run_status.config(
-            text=f"Status: Opening simulation window ({config.grid_size}x{config.grid_size}, {config.iterations} steps)...",
+            text=f"Status: Opening simulation window ({config.grid_size}x{config.grid_size}, {iters_desc})...",
             foreground="#38bdf8"
         )
         self.root.update_idletasks()

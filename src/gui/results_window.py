@@ -91,6 +91,7 @@ class ResultsWindow:
         self.is_paused = False
         self.is_running = False
         self.is_finished = False
+        self.was_manually_stopped = False
         self.cpu_finished = False
         self.gpu_finished = False
         self._stop_event = threading.Event()
@@ -209,7 +210,7 @@ class ResultsWindow:
         hdr = tk.Frame(self.main_frame, bg=BG_DARK)
         hdr.pack(fill="x", padx=20, pady=(14, 6))
 
-        # Right box for prominent top-right Start Simulation button
+        # Right box for prominent top-right Start Simulation and Stop Simulation buttons
         right_box = tk.Frame(hdr, bg=BG_DARK)
         right_box.pack(side="right", anchor="ne", padx=(14, 0), pady=2)
 
@@ -224,10 +225,27 @@ class ResultsWindow:
             fg="#ffffff",
             activebackground="#047857",
             activeforeground="#ffffff",
-            padx=18,
+            padx=16,
             pady=7
         )
-        self.btn_start_top.pack(anchor="ne")
+        self.btn_start_top.pack(side="left", padx=(0, 8))
+
+        self.btn_stop_top = tk.Button(
+            right_box,
+            text="⏹  Stop Simulation",
+            command=self._on_stop_click,
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            cursor="",
+            state="disabled",
+            bg=BTN_BG,
+            fg=TEXT_MUTED,
+            activebackground="#b91c1c",
+            activeforeground="#ffffff",
+            padx=16,
+            pady=7
+        )
+        self.btn_stop_top.pack(side="left")
 
         # Left box for title and configuration info
         left_box = tk.Frame(hdr, bg=BG_DARK)
@@ -243,11 +261,12 @@ class ResultsWindow:
         if not self.has_hardware_cuda:
             mode_text = "Normal CPU (No CUDA found on machine)"
 
+        gen_info = "Unlimited (∞)" if self.config.is_unlimited else str(self.config.iterations)
         sub = tk.Label(
             left_box,
             text=(
                 f"Grid: {self.config.grid_size}×{self.config.grid_size}  |  "
-                f"Generations: {self.config.iterations}  |  "
+                f"Generations: {gen_info}  |  "
                 f"Pattern: {self.config.pattern}  |  "
                 f"Boundary: {self.config.edge_behavior}  |  "
                 f"Mode: {mode_text}"
@@ -429,16 +448,20 @@ class ResultsWindow:
         if self.cpu_finished:
             cum_ms = sum(self.cpu_step_times)
             t_str = self._format_time_val(cum_ms)
+            tag = "STOPPED in" if self.was_manually_stopped else "COMPLETED in"
+            sym = "⏹" if self.was_manually_stopped else "✅"
+            gen_done = self.cpu_current_gen if (self.config.is_unlimited or self.was_manually_stopped) else self.config.iterations
             self.lbl_cpu_gen.config(
-                text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}) ✅",
+                text=f"Gen: {gen_done} ({tag} {t_str}) {sym}",
                 fg="#38bdf8"
             )
         elif self.cpu_current_gen > 0 and self.cpu_step_times:
             cum_ms = sum(self.cpu_step_times)
             last_ms = self.cpu_step_times[-1]
             t_str = self._format_time_val(cum_ms)
+            gen_disp = f"Gen: {self.cpu_current_gen} (∞)" if self.config.is_unlimited else f"Gen: {self.cpu_current_gen}/{self.config.iterations}"
             self.lbl_cpu_gen.config(
-                text=f"Gen: {self.cpu_current_gen}/{self.config.iterations}  |  {t_str}  ({last_ms:.2f} ms/step)",
+                text=f"{gen_disp}  |  {t_str}  ({last_ms:.2f} ms/step)",
                 fg=GRAPH_CPU
             )
 
@@ -447,16 +470,20 @@ class ResultsWindow:
         elif self.gpu_finished:
             cum_ms = sum(self.gpu_step_times)
             t_str = self._format_time_val(cum_ms)
+            tag = "STOPPED in" if self.was_manually_stopped else "COMPLETED in"
+            sym = "⏹" if self.was_manually_stopped else "🚀"
+            gen_done = self.gpu_current_gen if (self.config.is_unlimited or self.was_manually_stopped) else self.config.iterations
             self.lbl_gpu_gen.config(
-                text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}! 🚀)",
+                text=f"Gen: {gen_done} ({tag} {t_str}! {sym})",
                 fg="#10b981"
             )
         elif self.gpu_current_gen > 0 and self.gpu_step_times:
             cum_ms = sum(self.gpu_step_times)
             last_ms = self.gpu_step_times[-1]
             t_str = self._format_time_val(cum_ms)
+            gen_disp = f"Gen: {self.gpu_current_gen} (∞)" if self.config.is_unlimited else f"Gen: {self.gpu_current_gen}/{self.config.iterations}"
             self.lbl_gpu_gen.config(
-                text=f"Gen: {self.gpu_current_gen}/{self.config.iterations}  |  {t_str}  ({last_ms:.2f} ms/step)",
+                text=f"{gen_disp}  |  {t_str}  ({last_ms:.2f} ms/step)",
                 fg=GRAPH_GPU
             )
 
@@ -624,7 +651,24 @@ class ResultsWindow:
             padx=16,
             pady=6
         )
-        self.btn_start.pack(side="left", padx=(0, 8))
+        self.btn_start.pack(side="left", padx=(0, 6))
+
+        self.btn_stop = tk.Button(
+            btn_frame,
+            text="⏹  Stop",
+            command=self._on_stop_click,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            cursor="",
+            state="disabled",
+            bg=BTN_BG,
+            fg=TEXT_MUTED,
+            activebackground="#b91c1c",
+            activeforeground="#ffffff",
+            padx=14,
+            pady=6
+        )
+        self.btn_stop.pack(side="left", padx=(0, 8))
 
         self.btn_pause = tk.Button(
             btn_frame,
@@ -666,12 +710,35 @@ class ResultsWindow:
         # Disable both Start buttons while running
         for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
             if btn and btn.winfo_exists():
-                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED)
+                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED, cursor="")
+
+        # Enable both Stop buttons while running
+        for btn in (getattr(self, "btn_stop_top", None), getattr(self, "btn_stop", None)):
+            if btn and btn.winfo_exists():
+                btn.config(state="normal", bg="#dc2626", fg="#ffffff", cursor="hand2")
 
         self.btn_pause.config(state="normal", text="⏸  Pause")
         self.lbl_status.config(text="⏳ Simulation running...", fg=ACCENT_ORANGE)
 
         self._start_simulation()
+
+    def _on_stop_click(self):
+        """
+        Handler for '⏹ Stop Simulation' button.
+        Stops the simulation immediately (whether unlimited or fixed iterations),
+        preserves completed steps, and computes benchmark statistics for the run.
+        """
+        if not self.is_running or self.is_finished:
+            return
+
+        self.was_manually_stopped = True
+        self.lbl_status.config(text="🛑 Stopping simulation...", fg=ACCENT_ORANGE)
+        self._stop_event.set()
+
+        # Disable Stop buttons immediately
+        for btn in (getattr(self, "btn_stop_top", None), getattr(self, "btn_stop", None)):
+            if btn and btn.winfo_exists():
+                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED, cursor="")
 
     # ───────────────────── SIMULATION LOGIC ─────────────────────
 
@@ -680,6 +747,7 @@ class ResultsWindow:
         self.is_running = True
         self.is_finished = False
         self.is_paused = False
+        self.was_manually_stopped = False
         self.cpu_finished = False
         self.gpu_finished = False
         self.cpu_current_gen = 0
@@ -768,20 +836,31 @@ class ResultsWindow:
         """
         Background worker thread running Normal CPU simulation.
         Advances generation-by-generation at normal CPU speed / animation pacing.
+        Supports both fixed iterations and unlimited simulation with clean stopping.
         """
         try:
             engine = CPUEngine(edge_behavior=self.config.edge_behavior)
             initial = self.initial_grid.copy()
-            gen_iter = engine.run_stepwise(initial, self.config.iterations)
+            max_iters = None if self.config.is_unlimited else self.config.iterations
+            gen_iter = engine.run_stepwise(initial, max_iters)
 
             pure_compute_sec = 0.0
-            for step_idx in range(1, self.config.iterations + 1):
+            step_idx = 0
+            while not self._stop_event.is_set():
+                step_idx += 1
+                if max_iters is not None and step_idx > max_iters:
+                    break
+
                 while self.is_paused and not self._stop_event.is_set():
                     time.sleep(0.04)
                 if self._stop_event.is_set():
-                    return
+                    break
 
-                _, grid, ms = next(gen_iter)
+                try:
+                    _, grid, ms = next(gen_iter)
+                except StopIteration:
+                    break
+
                 pure_compute_sec += (ms / 1000.0)
                 self._queue.put(("cpu_step", step_idx, grid, ms))
 
@@ -798,6 +877,7 @@ class ResultsWindow:
         Background worker thread running CUDA GPU simulation.
         Runs at GPU acceleration speed, completing generations significantly faster
         than CPU, so CUDA finishes early and stops on canvas while CPU is still running!
+        Supports both fixed iterations and unlimited simulation with clean stopping.
         """
         try:
             engine = CUDAEngine(
@@ -806,16 +886,26 @@ class ResultsWindow:
                 emulate_if_unavailable=True
             )
             initial = self.initial_grid.copy()
-            gen_iter = engine.run_stepwise(initial, self.config.iterations)
+            max_iters = None if self.config.is_unlimited else self.config.iterations
+            gen_iter = engine.run_stepwise(initial, max_iters)
 
             pure_gpu_kernel_sec = 0.0
-            for step_idx in range(1, self.config.iterations + 1):
+            step_idx = 0
+            while not self._stop_event.is_set():
+                step_idx += 1
+                if max_iters is not None and step_idx > max_iters:
+                    break
+
                 while self.is_paused and not self._stop_event.is_set():
                     time.sleep(0.04)
                 if self._stop_event.is_set():
-                    return
+                    break
 
-                _, grid, ms = next(gen_iter)
+                try:
+                    _, grid, ms = next(gen_iter)
+                except StopIteration:
+                    break
+
                 pure_gpu_kernel_sec += (ms / 1000.0)
                 self._queue.put(("gpu_step", step_idx, grid, ms))
 
@@ -835,53 +925,54 @@ class ResultsWindow:
 
     def _on_cpu_step(self, gen: int, grid: np.ndarray, ms: float):
         """Handle 1 completed CPU generation step."""
-        if self._stop_event.is_set():
-            return
         self.cpu_current_gen = gen
         self.cpu_step_times.append(ms)
         self.cpu_current_grid = grid
         self._render_grid(self.cpu_canvas, grid, "cpu")
         cum_ms = sum(self.cpu_step_times)
         t_str = self._format_time_val(cum_ms)
+        gen_disp = f"Gen: {gen} (∞)" if self.config.is_unlimited else f"Gen: {gen} / {self.config.iterations}"
         self.lbl_cpu_gen.config(
-            text=f"Gen: {gen} / {self.config.iterations}  |  {t_str}  ({ms:.2f} ms/step)",
+            text=f"{gen_disp}  |  {t_str}  ({ms:.2f} ms/step)",
             fg=GRAPH_CPU
         )
         self._update_progress_display()
         now = time.perf_counter()
-        if now - self._last_graph_update >= 0.20 or gen == self.config.iterations:
+        if now - self._last_graph_update >= 0.20 or (not self.config.is_unlimited and gen == self.config.iterations):
             self._last_graph_update = now
             self._update_graph()
 
     def _on_gpu_step(self, gen: int, grid: np.ndarray, ms: float):
         """Handle 1 completed CUDA GPU generation step."""
-        if self._stop_event.is_set():
-            return
         self.gpu_current_gen = gen
         self.gpu_step_times.append(ms)
         self.gpu_current_grid = grid
         self._render_grid(self.gpu_canvas, grid, "gpu")
         cum_ms = sum(self.gpu_step_times)
         t_str = self._format_time_val(cum_ms)
+        gen_disp = f"Gen: {gen} (∞)" if self.config.is_unlimited else f"Gen: {gen} / {self.config.iterations}"
         self.lbl_gpu_gen.config(
-            text=f"Gen: {gen} / {self.config.iterations}  |  {t_str}  ({ms:.2f} ms/step)",
+            text=f"{gen_disp}  |  {t_str}  ({ms:.2f} ms/step)",
             fg=GRAPH_GPU
         )
         self._update_progress_display()
         now = time.perf_counter()
-        if now - self._last_graph_update >= 0.20 or gen == self.config.iterations:
+        if now - self._last_graph_update >= 0.20 or (not self.config.is_unlimited and gen == self.config.iterations):
             self._last_graph_update = now
             self._update_graph()
 
     def _on_cpu_done(self, total_sec: float):
-        """CPU worker finished all generations."""
+        """CPU worker finished all generations or was stopped."""
         self.cpu_finished = True
         self.cpu_total_time_sec = total_sec
         self.result.cpu_time_sec = total_sec
         cum_ms = sum(self.cpu_step_times)
         t_str = self._format_time_val(cum_ms)
+        tag = "STOPPED in" if self.was_manually_stopped else "COMPLETED in"
+        sym = "⏹" if self.was_manually_stopped else "✅"
+        gen_done = self.cpu_current_gen if (self.config.is_unlimited or self.was_manually_stopped) else self.config.iterations
         self.lbl_cpu_gen.config(
-            text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}) ✅",
+            text=f"Gen: {gen_done} ({tag} {t_str}) {sym}",
             fg="#38bdf8"
         )
         self._update_progress_display()
@@ -889,7 +980,7 @@ class ResultsWindow:
         self._check_both_done()
 
     def _on_gpu_done(self, kernel_sec: float, transfer_sec: float):
-        """CUDA GPU worker finished all generations (finishes early)."""
+        """CUDA GPU worker finished all generations or was stopped."""
         self.gpu_finished = True
         self.gpu_total_time_sec = kernel_sec
         self.result.cuda_kernel_time_sec = kernel_sec
@@ -897,8 +988,11 @@ class ResultsWindow:
         self.result.cuda_total_time_sec = kernel_sec + transfer_sec
         cum_ms = sum(self.gpu_step_times)
         t_str = self._format_time_val(cum_ms)
+        tag = "STOPPED in" if self.was_manually_stopped else "COMPLETED in"
+        sym = "⏹" if self.was_manually_stopped else "🚀"
+        gen_done = self.gpu_current_gen if (self.config.is_unlimited or self.was_manually_stopped) else self.config.iterations
         self.lbl_gpu_gen.config(
-            text=f"Gen: {self.config.iterations} (COMPLETED in {t_str}! 🚀)",
+            text=f"Gen: {gen_done} ({tag} {t_str}! {sym})",
             fg="#10b981"
         )
         self._update_progress_display()
@@ -916,19 +1010,34 @@ class ResultsWindow:
             and self.config.run_mode != RunMode.CPU_ONLY.value
         )
 
-        if not run_gpu:
-            self.progress_bar["value"] = c_gen
-            pct = (c_gen / n_iters) * 100
-            self.lbl_progress.config(
-                text=f"Normal CPU: Gen {c_gen} / {n_iters} ({pct:.0f}%)  |  CUDA: No CUDA found"
-            )
+        if self.config.is_unlimited:
+            self.progress_bar["value"] = (c_gen % 100)
+            if not run_gpu:
+                self.lbl_progress.config(
+                    text=f"Normal CPU: Gen {c_gen} (Unlimited ♾️)  |  CUDA: No CUDA found"
+                )
+            else:
+                gpu_str = f"CUDA: Gen {g_gen}"
+                if self.gpu_finished:
+                    gpu_str = f"CUDA: Gen {g_gen} (Done 🚀)"
+                self.lbl_progress.config(
+                    text=f"Normal CPU: Gen {c_gen} (Unlimited ♾️)  |  {gpu_str}"
+                )
         else:
-            self.progress_bar["value"] = c_gen
-            c_pct = (c_gen / n_iters) * 100
-            gpu_str = f"CUDA: {n_iters}/{n_iters} (Done 🚀)" if self.gpu_finished else f"CUDA: {g_gen}/{n_iters}"
-            self.lbl_progress.config(
-                text=f"Normal CPU: {c_gen}/{n_iters} ({c_pct:.0f}%)  |  {gpu_str}"
-            )
+            denom = max(1, n_iters)
+            if not run_gpu:
+                self.progress_bar["value"] = c_gen
+                pct = (c_gen / denom) * 100
+                self.lbl_progress.config(
+                    text=f"Normal CPU: Gen {c_gen} / {n_iters} ({pct:.0f}%)  |  CUDA: No CUDA found"
+                )
+            else:
+                self.progress_bar["value"] = c_gen
+                c_pct = (c_gen / denom) * 100
+                gpu_str = f"CUDA: {n_iters}/{n_iters} (Done 🚀)" if self.gpu_finished else f"CUDA: {g_gen}/{n_iters}"
+                self.lbl_progress.config(
+                    text=f"Normal CPU: {c_gen}/{n_iters} ({c_pct:.0f}%)  |  {gpu_str}"
+                )
 
     def _check_both_done(self):
         """Check if all active simulation engines have finished."""
@@ -1083,6 +1192,10 @@ class ResultsWindow:
         self.is_running = False
         self.is_finished = True
 
+        actual_gens = max(self.cpu_current_gen, self.gpu_current_gen, len(self.cpu_step_times), len(self.gpu_step_times))
+        if self.config.is_unlimited or self.was_manually_stopped:
+            self.result.iterations = actual_gens
+
         r = self.result
         r.per_step_times_cpu = self.cpu_step_times[:]
         r.per_step_times_gpu = self.gpu_step_times[:]
@@ -1119,7 +1232,23 @@ class ResultsWindow:
         self._populate_stats_table()
 
         # Update status banner
-        if self.has_hardware_cuda and self.gpu_step_times:
+        if self.was_manually_stopped:
+            cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
+            cpu_t_str = self._format_time_val(cpu_ms)
+            if self.has_hardware_cuda and self.gpu_step_times:
+                gpu_ms = (r.cuda_kernel_time_sec or 0.0) * 1000.0
+                gpu_t_str = self._format_time_val(gpu_ms)
+                speedup_str = f"  |  Speedup: {r.kernel_speedup:.2f}×" if r.kernel_speedup else ""
+                self.lbl_status.config(
+                    text=f"⏹ Stopped by user! CPU: {cpu_t_str}  |  CUDA: {gpu_t_str} ({actual_gens} gens){speedup_str}",
+                    fg=ACCENT_ORANGE
+                )
+            else:
+                self.lbl_status.config(
+                    text=f"⏹ Stopped by user after {actual_gens} generations ({cpu_t_str})",
+                    fg=ACCENT_ORANGE
+                )
+        elif self.has_hardware_cuda and self.gpu_step_times:
             speedup_str = f"  |  Speedup: {r.kernel_speedup:.2f}×" if r.kernel_speedup else ""
             match_str = "  |  Grids: Match ✅" if r.grids_match else ""
             cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
@@ -1139,13 +1268,20 @@ class ResultsWindow:
             )
 
         self.btn_pause.config(state="disabled")
+        # Disable Stop buttons
+        for btn in (getattr(self, "btn_stop_top", None), getattr(self, "btn_stop", None)):
+            if btn and btn.winfo_exists():
+                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED, cursor="")
+
+        # Enable Start buttons to allow restarting
         for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
             if btn and btn.winfo_exists():
                 btn.config(
                     state="normal",
                     text="🔄  Restart Simulation",
                     bg="#059669",
-                    fg="#ffffff"
+                    fg="#ffffff",
+                    cursor="hand2"
                 )
 
     def _populate_stats_table(self):
@@ -1169,11 +1305,18 @@ class ResultsWindow:
         gpu_total_ms = (r.cuda_kernel_time_sec * 1000.0) if r.cuda_kernel_time_sec is not None else None
         cpu_t_disp = self._format_time_val(cpu_total_ms) if cpu_total_ms is not None else "N/A"
         gpu_t_disp = self._format_time_val(gpu_total_ms) if gpu_total_ms is not None else "N/A"
+
+        scope_str = f"Whole run, {n_gens} generations"
+        if self.was_manually_stopped:
+            scope_str = f"Stopped at {n_gens} generations"
+        elif self.config.is_unlimited:
+            scope_str = f"{n_gens} generations (unlimited mode)"
+
         _update_row(
             "total_time",
             cpu_t_disp,
             gpu_t_disp,
-            f"Whole run, {n_gens} generations",
+            scope_str,
             "Main result"
         )
 
@@ -1268,6 +1411,7 @@ class ResultsWindow:
         self.is_running = False
         self.is_paused = False
         self.is_finished = False
+        self.was_manually_stopped = False
         self.cpu_finished = False
         self.gpu_finished = False
         self.cpu_current_gen = 0
@@ -1291,7 +1435,8 @@ class ResultsWindow:
         self.cpu_canvas.delete("all")
         self.gpu_canvas.delete("all")
         self.progress_bar["value"] = 0
-        self.lbl_progress.config(text=f"Generation 0 / {self.config.iterations}  (Ready to start)")
+        gens_ready = "Unlimited (∞)" if self.config.is_unlimited else str(self.config.iterations)
+        self.lbl_progress.config(text=f"Generation 0 / {gens_ready}  (Ready to start)")
         self.lbl_cpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step", fg=TEXT_SECONDARY)
         init_gpu_text = "Gen: 0 (Ready)  |  — ms/step" if self.has_hardware_cuda else "❌ No CUDA found on this machine"
         init_gpu_fg = TEXT_SECONDARY if self.has_hardware_cuda else "#ef4444"
@@ -1341,8 +1486,12 @@ class ResultsWindow:
                     state="normal",
                     text="▶  Start Simulation",
                     bg="#059669",
-                    fg="#ffffff"
+                    fg="#ffffff",
+                    cursor="hand2"
                 )
+        for btn in (getattr(self, "btn_stop_top", None), getattr(self, "btn_stop", None)):
+            if btn and btn.winfo_exists():
+                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED, cursor="")
         self.btn_pause.config(text="⏸  Pause", state="disabled")
         self.lbl_status.config(text="Simulation reset. Click '▶ Start Simulation' to begin.", fg=ACCENT_CYAN)
 
@@ -1361,7 +1510,7 @@ class ResultsWindow:
             title="Export Benchmark Results as CSV",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"gol_benchmark_{self.config.grid_size}x{self.config.grid_size}_{self.config.iterations}steps.csv"
+            initialfile=f"gol_benchmark_{self.config.grid_size}x{self.config.grid_size}_{self.result.iterations}steps.csv"
         )
         if not filepath:
             return
