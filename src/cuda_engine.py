@@ -7,6 +7,8 @@ wrap-around vs dead-edges boundary conditions, and device-memory double bufferin
 import time
 import math
 import platform
+import ctypes
+import sys
 from typing import Tuple, Optional
 import numpy as np
 from src.config import EdgeBehavior, AVAILABLE_BLOCK_SIZES
@@ -94,6 +96,107 @@ class CUDAEngine:
         self.is_emulated = (not _CUDA_READY) and emulate_if_unavailable
 
     @staticmethod
+    def check_cuda_detailed() -> dict:
+        """
+        Deep multi-layer check for NVIDIA CUDA hardware, driver API, and Numba JIT compiler.
+        Returns:
+            dict containing:
+                - is_available (bool): True if CUDA hardware/driver is detected.
+                - status_text (str): "CUDA is available" (green) or "No CUDA found" (red).
+                - color (str): "#22c55e" (green) or "#ef4444" (red).
+                - gpu_name (str): Device name (e.g. "NVIDIA GeForce RTX 3050 Laptop GPU").
+                - device_count (int): Number of detected CUDA devices.
+                - compute_capability (str): Compute capability (e.g. "8.6").
+                - vram_mb (float): Total VRAM in Megabytes.
+                - driver_version (str): Driver CUDA API version (e.g. "13.3").
+                - jit_ready (bool): Whether Numba JIT kernel compilation is active.
+                - summary_line (str): Single-line summary.
+        """
+        # Layer 1: Check Numba CUDA JIT runtime
+        try:
+            from numba import cuda as _numba_cuda
+            if _numba_cuda.is_available():
+                dev = _numba_cuda.get_current_device()
+                name = dev.name.decode() if isinstance(dev.name, bytes) else str(dev.name)
+                cc = f"{dev.compute_capability[0]}.{dev.compute_capability[1]}"
+                vram_mb = 0.0
+                try:
+                    meminfo = _numba_cuda.current_context().get_memory_info()
+                    vram_mb = round(meminfo.total / (1024 * 1024), 1)
+                except Exception:
+                    pass
+                return {
+                    "is_available": True,
+                    "status_text": "CUDA is available",
+                    "color": "#22c55e",
+                    "gpu_name": name,
+                    "device_count": len(_numba_cuda.gpus) if hasattr(_numba_cuda, "gpus") else 1,
+                    "compute_capability": cc,
+                    "vram_mb": vram_mb,
+                    "driver_version": "Numba CUDA Runtime",
+                    "jit_ready": True,
+                    "summary_line": f"{name} (CC {cc}, {vram_mb/1024:.1f} GB VRAM)" if vram_mb > 0 else f"{name} (CC {cc})",
+                }
+        except Exception:
+            pass
+
+        # Layer 2: Check standard CUDA Driver API directly (nvcuda.dll / libcuda.so)
+        try:
+            libname = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so"
+            lib = ctypes.WinDLL(libname) if sys.platform == "win32" else ctypes.CDLL(libname)
+            if lib.cuInit(0) == 0:
+                count = ctypes.c_int()
+                if lib.cuDeviceGetCount(ctypes.byref(count)) == 0 and count.value > 0:
+                    dev = ctypes.c_int()
+                    lib.cuDeviceGet(ctypes.byref(dev), 0)
+                    name_buf = ctypes.create_string_buffer(256)
+                    lib.cuDeviceGetName(name_buf, 256, dev)
+                    gpu_name = name_buf.value.decode(errors="ignore")
+
+                    major = ctypes.c_int()
+                    minor = ctypes.c_int()
+                    lib.cuDeviceGetAttribute(ctypes.byref(major), 75, dev)
+                    lib.cuDeviceGetAttribute(ctypes.byref(minor), 76, dev)
+                    cc = f"{major.value}.{minor.value}" if major.value > 0 else "N/A"
+
+                    total_mem = ctypes.c_size_t()
+                    lib.cuDeviceTotalMem(ctypes.byref(total_mem), dev)
+                    vram_mb = round(total_mem.value / (1024 * 1024), 1)
+
+                    ver = ctypes.c_int()
+                    lib.cuDriverGetVersion(ctypes.byref(ver))
+                    drv_ver = f"{ver.value // 1000}.{(ver.value % 1000) // 10}" if ver.value > 0 else "N/A"
+
+                    return {
+                        "is_available": True,
+                        "status_text": "CUDA is available",
+                        "color": "#22c55e",
+                        "gpu_name": gpu_name,
+                        "device_count": count.value,
+                        "compute_capability": cc,
+                        "vram_mb": vram_mb,
+                        "driver_version": drv_ver,
+                        "jit_ready": False,
+                        "summary_line": f"{gpu_name} (CC {cc}, {vram_mb/1024:.1f} GB VRAM, Driver {drv_ver})",
+                    }
+        except Exception:
+            pass
+
+        # Layer 3: No physical NVIDIA CUDA device found
+        return {
+            "is_available": False,
+            "status_text": "No CUDA found",
+            "color": "#ef4444",
+            "gpu_name": "None",
+            "device_count": 0,
+            "compute_capability": "N/A",
+            "vram_mb": 0.0,
+            "driver_version": "N/A",
+            "jit_ready": False,
+            "summary_line": "No compatible NVIDIA CUDA GPU detected",
+        }
+
+    @staticmethod
     def is_available() -> bool:
         """Check if CUDA runtime and device are available (or emulation supported)."""
         global _CUDA_READY
@@ -102,12 +205,7 @@ class CUDAEngine:
     @staticmethod
     def has_cuda_hardware() -> bool:
         """Check if actual physical NVIDIA CUDA hardware is available."""
-        global _CUDA_READY
-        try:
-            from numba import cuda
-            return bool(cuda.is_available())
-        except Exception:
-            return False
+        return CUDAEngine.check_cuda_detailed()["is_available"]
 
     def _check_cuda(self):
         global _CUDA_READY, _kernel_wrap, _kernel_dead_edges
@@ -225,9 +323,10 @@ class CUDAEngine:
         final_grid, _, _ = self.run(grid, iterations=1)
         return final_grid
 
-    def run_stepwise(self, initial_grid: np.ndarray, iterations: int):
+    def run_stepwise(self, initial_grid: np.ndarray, iterations: Optional[int] = None):
         """
         Generator that yields timing data after each generation step on GPU.
+        If iterations is None or <= 0, runs indefinitely until stopped.
 
         Yields:
             Tuple[int, np.ndarray, float]: (generation_number, grid_snapshot, step_time_ms)
@@ -236,7 +335,11 @@ class CUDAEngine:
 
         if self.is_emulated:
             current = initial_grid.copy()
-            for gen in range(1, iterations + 1):
+            gen = 0
+            while True:
+                gen += 1
+                if iterations is not None and iterations > 0 and gen > iterations:
+                    break
                 t0 = time.perf_counter()
                 current = self._emulate_step(current)
                 raw_ms = (time.perf_counter() - t0) * 1000.0
@@ -258,7 +361,11 @@ class CUDAEngine:
         d_current = cuda.to_device(np.ascontiguousarray(initial_grid, dtype=np.uint8))
         d_next = cuda.device_array_like(d_current)
 
-        for gen in range(1, iterations + 1):
+        gen = 0
+        while True:
+            gen += 1
+            if iterations is not None and iterations > 0 and gen > iterations:
+                break
             cuda.synchronize()
             step_start = time.perf_counter()
 
@@ -279,31 +386,20 @@ class CUDAEngine:
         Return a dict with GPU device name, CUDA version, and VRAM.
         Returns hardware info if NVIDIA CUDA is present, or emulated GPU info.
         """
-        info = {
-            "gpu_name": "N/A",
-            "cuda_version": "N/A",
-            "vram_bytes": 0,
-            "is_hardware": False
-        }
-        try:
-            from numba import cuda as _cuda
-            if _cuda.is_available():
-                device = _cuda.get_current_device()
-                name = device.name.decode() if isinstance(device.name, bytes) else str(device.name)
-                info["gpu_name"] = name
-                cc = device.compute_capability
-                info["cuda_version"] = f"Compute {cc[0]}.{cc[1]}"
-                meminfo = _cuda.current_context().get_memory_info()
-                info["vram_bytes"] = meminfo.total
-                info["is_hardware"] = True
-                return info
-        except Exception:
-            pass
+        diag = CUDAEngine.check_cuda_detailed()
+        if diag["is_available"]:
+            return {
+                "gpu_name": diag["gpu_name"],
+                "cuda_version": f"CUDA {diag['driver_version']} (CC {diag['compute_capability']})",
+                "vram_bytes": int(diag["vram_mb"] * 1024 * 1024),
+                "is_hardware": True
+            }
 
         # Fallback for systems without NVIDIA GPU (e.g. macOS)
         proc = platform.processor() or platform.machine() or "GPU"
-        info["gpu_name"] = f"NVIDIA CUDA (Simulated / {proc})"
-        info["cuda_version"] = "CUDA 12.4 (Emulated)"
-        info["vram_bytes"] = 8 * (1024 ** 3)
-        info["is_hardware"] = False
-        return info
+        return {
+            "gpu_name": f"NVIDIA CUDA (Simulated / {proc})",
+            "cuda_version": "CUDA 12.4 (Emulated)",
+            "vram_bytes": 8 * (1024 ** 3),
+            "is_hardware": False
+        }

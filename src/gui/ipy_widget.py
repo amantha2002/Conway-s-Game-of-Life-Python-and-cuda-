@@ -22,6 +22,7 @@ from src.config import (
 from src.patterns import create_initial_grid, PATTERN_NAMES
 from src.preview import render_preview_image
 from src.benchmark import run_benchmark
+from src.cuda_engine import CUDAEngine
 
 
 def create_notebook_dashboard(on_run_callback: Optional[Callable[[SimulationConfig], None]] = None):
@@ -238,8 +239,57 @@ def create_notebook_dashboard(on_run_callback: Optional[Callable[[SimulationConf
         )
     )
 
+    # CUDA Check Widgets
+    w_btn_check_cuda = widgets.Button(
+        description="Check CUDA Available",
+        button_style="primary",
+        tooltip="Probe system for NVIDIA CUDA hardware and driver",
+        layout=widgets.Layout(width="220px", height="34px")
+    )
+    w_cuda_status = widgets.HTML(
+        value="<span style='color: #94a3b8;'>Probing CUDA hardware...</span>",
+        layout=widgets.Layout(margin="6px 0px 0px 10px")
+    )
+
+    def on_check_cuda_clicked(b=None):
+        diag = CUDAEngine.check_cuda_detailed()
+        if diag["is_available"]:
+            # GREEN COLOR: "CUDA is available"
+            w_cuda_status.value = (
+                f"<div style='font-size: 13px; font-family: Segoe UI, sans-serif;'>"
+                f"<b style='color: #22c55e;'>● CUDA is available</b> &mdash; "
+                f"<span style='color: #cbd5e1;'>{diag['gpu_name']}</span> "
+                f"<span style='color: #94a3b8;'>(Compute {diag['compute_capability']}, {diag['vram_mb']/1024:.1f} GB VRAM, Driver {diag['driver_version']})</span>"
+                f"</div>"
+            )
+        else:
+            # RED COLOR: "No CUDA found"
+            w_cuda_status.value = (
+                f"<div style='font-size: 13px; font-family: Segoe UI, sans-serif;'>"
+                f"<b style='color: #ef4444;'>● No CUDA found</b> &mdash; "
+                f"<span style='color: #fca5a5;'>No compatible NVIDIA GPU/driver detected. Simulation will run in CPU mode.</span>"
+                f"</div>"
+            )
+
+    w_btn_check_cuda.on_click(on_check_cuda_clicked)
+    on_check_cuda_clicked()  # Initial probe
+
+    cuda_box = widgets.VBox(
+        [
+            widgets.HTML("<h3 style='color: #38bdf8; margin-bottom: 4px;'>⚡ CUDA Hardware Acceleration</h3>"),
+            widgets.HBox([w_btn_check_cuda, w_cuda_status], layout=widgets.Layout(align_items="center")),
+        ],
+        layout=widgets.Layout(
+            border="1px solid #334155",
+            padding="12px",
+            border_radius="8px",
+            margin="4px 0px 12px 0px",
+            background_color="#0b0f19"
+        )
+    )
+
     action_box = widgets.VBox([w_btn_run, w_output], layout=widgets.Layout(align_items="center"))
 
-    dashboard = widgets.VBox([settings_box, preview_box, action_box])
+    dashboard = widgets.VBox([cuda_box, settings_box, preview_box, action_box])
     display(dashboard)
     return dashboard
