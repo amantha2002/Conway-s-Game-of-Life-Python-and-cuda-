@@ -56,6 +56,7 @@ class GameOfLifeSettingsWindow:
         self.current_grid: Optional[np.ndarray] = None
         self.photo_img: Optional[ImageTk.PhotoImage] = None
         self._last_cuda_diag = None
+        self.results_window: Optional[ResultsWindow] = None
 
         # Build UI
         self._init_styles()
@@ -594,10 +595,10 @@ class GameOfLifeSettingsWindow:
             self.lbl_stats.config(text=f"Preview Error: {e}")
 
     def _on_run_click(self):
-        """Triggered when the user clicks the Run button."""
+        """Triggered when the user clicks the Run button in the settings window."""
         config = self.get_config()
         self.lbl_run_status.config(
-            text=f"Status: Launching {config.run_mode} ({config.grid_size}x{config.grid_size}, {config.iterations} steps)...",
+            text=f"Status: Opening simulation window ({config.grid_size}x{config.grid_size}, {config.iterations} steps)...",
             foreground="#38bdf8"
         )
         self.root.update_idletasks()
@@ -606,13 +607,21 @@ class GameOfLifeSettingsWindow:
             # Delegate to custom callback if provided
             self.on_run_callback(config)
         else:
-            # Default action: open the Results Window with live simulation
+            # Default action: open the Results Window (user clicks Start Simulation inside it)
             try:
-                ResultsWindow(self.root, config)
-                self.lbl_run_status.config(
-                    text="Status: Results window opened — simulation running.",
-                    foreground="#4ade80"
-                )
+                if self.results_window is not None and self.results_window.win.winfo_exists():
+                    self.results_window.win.lift()
+                    self.results_window.win.focus_force()
+                    self.lbl_run_status.config(
+                        text="Status: Simulation window focused. Click 'Start Simulation' there.",
+                        foreground="#4ade80"
+                    )
+                else:
+                    self.results_window = ResultsWindow(self.root, config)
+                    self.lbl_run_status.config(
+                        text="Status: Simulation window opened. Click 'Start Simulation' there.",
+                        foreground="#4ade80"
+                    )
             except Exception as e:
                 self.lbl_run_status.config(text=f"Status Error: {e}", foreground="#f87171")
 

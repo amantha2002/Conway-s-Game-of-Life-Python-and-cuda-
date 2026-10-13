@@ -118,12 +118,23 @@ class ResultsWindow:
         self.win = tk.Toplevel(parent)
         self.win.title("Conway's Game of Life — Simulation Results & Benchmark")
         self.win.configure(bg=BG_DARK)
-        self.win.minsize(980, 680)
-        self.win.geometry("1060x860")
+
+        # Responsive geometry adapting to parent screen
+        screen_w = parent.winfo_screenwidth()
+        screen_h = parent.winfo_screenheight()
+        win_w = min(1060, max(840, screen_w - 60))
+        win_h = min(720, max(520, screen_h - 110))
+        pos_x = max(0, (screen_w - win_w) // 2)
+        pos_y = max(0, (screen_h - win_h) // 2 - 20)
+        self.win.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+        self.win.minsize(820, 500)
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
-        self._start_simulation()
+
+        # Display initial state on both canvases (generation 0 preview)
+        self._render_grid(self.cpu_canvas, self.initial_grid, "cpu")
+        self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
 
     # ───────────────────────── UI CONSTRUCTION ─────────────────────────
 
@@ -178,12 +189,36 @@ class ResultsWindow:
         self._build_control_buttons()
 
     def _build_header(self):
-        """Top header banner with simulation configuration details."""
+        """Top header banner with simulation configuration details and top-right Start button."""
         hdr = tk.Frame(self.main_frame, bg=BG_DARK)
         hdr.pack(fill="x", padx=20, pady=(14, 6))
 
+        # Right box for prominent top-right Start Simulation button
+        right_box = tk.Frame(hdr, bg=BG_DARK)
+        right_box.pack(side="right", anchor="ne", padx=(14, 0), pady=2)
+
+        self.btn_start_top = tk.Button(
+            right_box,
+            text="▶  Start Simulation",
+            command=self._on_start_click,
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            cursor="hand2",
+            bg="#059669",  # Vibrant emerald green
+            fg="#ffffff",
+            activebackground="#047857",
+            activeforeground="#ffffff",
+            padx=18,
+            pady=7
+        )
+        self.btn_start_top.pack(anchor="ne")
+
+        # Left box for title and configuration info
+        left_box = tk.Frame(hdr, bg=BG_DARK)
+        left_box.pack(side="left", fill="x", expand=True)
+
         title = tk.Label(
-            hdr, text="⚡ Simulation Results — CPU vs CUDA",
+            left_box, text="⚡ Simulation Results — CPU vs CUDA",
             font=("Segoe UI", 15, "bold"), fg=ACCENT_CYAN, bg=BG_DARK
         )
         title.pack(anchor="w")
@@ -193,7 +228,7 @@ class ResultsWindow:
             mode_text += " (CUDA Kernel: Fast Simulation on macOS)"
 
         sub = tk.Label(
-            hdr,
+            left_box,
             text=(
                 f"Grid: {self.config.grid_size}×{self.config.grid_size}  |  "
                 f"Generations: {self.config.iterations}  |  "
@@ -223,7 +258,7 @@ class ResultsWindow:
         cpu_title.pack(anchor="w", padx=12, pady=(10, 2))
 
         self.lbl_cpu_gen = tk.Label(
-            cpu_card, text="Gen: 0  |  — ms/step",
+            cpu_card, text="Gen: 0 (Ready)  |  — ms/step",
             font=("Consolas", 9), fg=TEXT_SECONDARY, bg=BG_CARD
         )
         self.lbl_cpu_gen.pack(anchor="w", padx=12, pady=(0, 4))
@@ -246,7 +281,7 @@ class ResultsWindow:
         gpu_title.pack(anchor="w", padx=12, pady=(10, 2))
 
         self.lbl_gpu_gen = tk.Label(
-            gpu_card, text="Gen: 0  |  — ms/step",
+            gpu_card, text="Gen: 0 (Ready)  |  — ms/step",
             font=("Consolas", 9), fg=TEXT_SECONDARY, bg=BG_CARD
         )
         self.lbl_gpu_gen.pack(anchor="w", padx=12, pady=(0, 4))
@@ -262,7 +297,7 @@ class ResultsWindow:
         prog_frame.pack(fill="x", padx=20, pady=(2, 4))
 
         self.lbl_progress = tk.Label(
-            prog_frame, text="Generation 0 / 0  (0%)",
+            prog_frame, text=f"Generation 0 / {self.config.iterations}  (Ready to start)",
             font=("Consolas", 9), fg=ACCENT_CYAN, bg=BG_DARK
         )
         self.lbl_progress.pack(anchor="w")
@@ -401,7 +436,7 @@ class ResultsWindow:
             self._tree_iids[key] = iid
 
     def _build_control_buttons(self):
-        """Action buttons row: Pause, Reset, Export CSV, Save Graphs, and Status."""
+        """Action buttons row: Start, Pause, Reset, Export CSV, Save Graphs, and Status."""
         btn_frame = tk.Frame(self.main_frame, bg=BG_DARK)
         btn_frame.pack(fill="x", padx=20, pady=(6, 18))
 
@@ -411,7 +446,30 @@ class ResultsWindow:
             activeforeground=TEXT_PRIMARY, padx=14, pady=6
         )
 
-        self.btn_pause = tk.Button(btn_frame, text="⏸  Pause", command=self._toggle_pause, **btn_style)
+        # Primary Start Simulation button as requested
+        self.btn_start = tk.Button(
+            btn_frame,
+            text="▶  Start Simulation",
+            command=self._on_start_click,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            cursor="hand2",
+            bg="#059669",  # Vibrant emerald green primary action
+            fg="#ffffff",
+            activebackground="#047857",
+            activeforeground="#ffffff",
+            padx=16,
+            pady=6
+        )
+        self.btn_start.pack(side="left", padx=(0, 8))
+
+        self.btn_pause = tk.Button(
+            btn_frame,
+            text="⏸  Pause",
+            command=self._toggle_pause,
+            state="disabled",
+            **btn_style
+        )
         self.btn_pause.pack(side="left", padx=(0, 8))
 
         self.btn_reset = tk.Button(btn_frame, text="🔄  Reset", command=self._reset_simulation, **btn_style)
@@ -425,10 +483,32 @@ class ResultsWindow:
 
         # Status label
         self.lbl_status = tk.Label(
-            btn_frame, text="⏳ Simulation running...",
-            font=("Segoe UI", 9, "italic"), fg=ACCENT_ORANGE, bg=BG_DARK
+            btn_frame,
+            text="Ready. Click '▶ Start Simulation' to begin.",
+            font=("Segoe UI", 9, "bold"),
+            fg=ACCENT_CYAN,
+            bg=BG_DARK
         )
         self.lbl_status.pack(side="right")
+
+    def _on_start_click(self):
+        """Handler for '▶ Start Simulation' button."""
+        if self.is_running:
+            return
+
+        if self.is_finished:
+            # Re-generate and restart
+            self._reset_simulation()
+
+        # Disable both Start buttons while running
+        for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
+            if btn and btn.winfo_exists():
+                btn.config(state="disabled", bg=BTN_BG, fg=TEXT_MUTED)
+
+        self.btn_pause.config(state="normal", text="⏸  Pause")
+        self.lbl_status.config(text="⏳ Simulation running...", fg=ACCENT_ORANGE)
+
+        self._start_simulation()
 
     # ───────────────────── SIMULATION LOGIC ─────────────────────
 
@@ -672,6 +752,14 @@ class ResultsWindow:
             fg=ACCENT_GREEN
         )
         self.btn_pause.config(state="disabled")
+        for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
+            if btn and btn.winfo_exists():
+                btn.config(
+                    state="normal",
+                    text="🔄  Restart Simulation",
+                    bg="#059669",
+                    fg="#ffffff"
+                )
 
     def _populate_stats_table(self):
         """
@@ -776,7 +864,7 @@ class ResultsWindow:
 
     def _toggle_pause(self):
         """Toggle pause / resume of the running simulation."""
-        if self.is_finished:
+        if not self.is_running or self.is_finished:
             return
         self.is_paused = not self.is_paused
         if self.is_paused:
@@ -787,18 +875,25 @@ class ResultsWindow:
             self.lbl_status.config(text="⏳ Simulation running...", fg=ACCENT_ORANGE)
 
     def _reset_simulation(self):
-        """Stop current simulation, reset state, clear table & graph, and restart from gen 0."""
+        """Stop current simulation, reset state, clear table & graph, and prepare gen 0 without auto-starting."""
         self._stop_event.set()
+        if self._poll_job:
+            try:
+                self.win.after_cancel(self._poll_job)
+            except Exception:
+                pass
         if self._sim_thread and self._sim_thread.is_alive():
             self._sim_thread.join(timeout=1.5)
 
         # Reset state
         self.generation = 0
+        self.is_running = False
+        self.is_paused = False
+        self.is_finished = False
         self.cpu_step_times.clear()
         self.gpu_step_times.clear()
         self.cpu_current_grid = None
         self.gpu_current_grid = None
-        self.is_finished = False
 
         self.result = BenchmarkResult(
             grid_size=self.config.grid_size,
@@ -811,9 +906,9 @@ class ResultsWindow:
         self.cpu_canvas.delete("all")
         self.gpu_canvas.delete("all")
         self.progress_bar["value"] = 0
-        self.lbl_progress.config(text=f"Generation 0 / {self.config.iterations}  (0%)")
-        self.lbl_cpu_gen.config(text="Gen: 0  |  — ms/step")
-        self.lbl_gpu_gen.config(text="Gen: 0  |  — ms/step")
+        self.lbl_progress.config(text=f"Generation 0 / {self.config.iterations}  (Ready to start)")
+        self.lbl_cpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step")
+        self.lbl_gpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step")
 
         # Reset graph
         self.line_cpu.set_data([], [])
@@ -847,12 +942,22 @@ class ResultsWindow:
                 old = self.tree.item(iid, "values")
                 self.tree.item(iid, values=(old[0], cpu_val, gpu_val, old[3], old[4]))
 
-        self.btn_pause.config(text="⏸  Pause", state="normal")
-        self.lbl_status.config(text="⏳ Simulation running...", fg=ACCENT_ORANGE)
-
-        # Re-generate initial grid and restart
+        # Re-generate initial grid and render it
         self.initial_grid = create_initial_grid(self.config)
-        self._start_simulation()
+        self._render_grid(self.cpu_canvas, self.initial_grid, "cpu")
+        self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
+
+        # Controls ready state (simulation NOT started automatically)
+        for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
+            if btn and btn.winfo_exists():
+                btn.config(
+                    state="normal",
+                    text="▶  Start Simulation",
+                    bg="#059669",
+                    fg="#ffffff"
+                )
+        self.btn_pause.config(text="⏸  Pause", state="disabled")
+        self.lbl_status.config(text="Simulation reset. Click '▶ Start Simulation' to begin.", fg=ACCENT_CYAN)
 
     def _export_csv(self):
         """Export both the summary statistics table and per-generation timing to CSV."""
