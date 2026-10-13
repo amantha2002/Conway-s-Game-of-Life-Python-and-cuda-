@@ -114,6 +114,11 @@ class ResultsWindow:
             block_size_str=config.block_size_str,
         )
 
+        # ── Animation & Graph settings ──
+        self.animation_delay_ms: int = 30  # Smooth real-time animation delay (30 ms per step = ~33 FPS)
+        self.time_unit: str = "ms"         # "ms" or "s" for graph X-axis and Y-axis rate
+        self.graph_mode: str = "rate"       # "rate" (Iterations / Unit Time) or "cumulative" (Progress)
+
         # ── Build window ──
         self.win = tk.Toplevel(parent)
         self.win.title("Conway's Game of Life — Simulation Results & Benchmark")
@@ -292,49 +297,101 @@ class ResultsWindow:
         )
         self.gpu_canvas.pack(padx=12, pady=(4, 12))
 
-        # ── Progress bar section ──
+        # ── Progress bar section with Animation Speed control ──
         prog_frame = tk.Frame(self.main_frame, bg=BG_DARK)
         prog_frame.pack(fill="x", padx=20, pady=(2, 4))
 
+        top_prog = tk.Frame(prog_frame, bg=BG_DARK)
+        top_prog.pack(fill="x")
+
         self.lbl_progress = tk.Label(
-            prog_frame, text=f"Generation 0 / {self.config.iterations}  (Ready to start)",
+            top_prog, text=f"Generation 0 / {self.config.iterations}  (Ready to start)",
             font=("Consolas", 9), fg=ACCENT_CYAN, bg=BG_DARK
         )
-        self.lbl_progress.pack(anchor="w")
+        self.lbl_progress.pack(side="left", anchor="w")
+
+        f_spd = tk.Frame(top_prog, bg=BG_DARK)
+        f_spd.pack(side="right")
+        tk.Label(
+            f_spd, text="🎬 Animation Speed:",
+            font=("Segoe UI", 9, "bold"), fg=TEXT_SECONDARY, bg=BG_DARK
+        ).pack(side="left", padx=(0, 6))
+
+        self.var_speed = tk.StringVar(value="Normal (30 ms)")
+        self.cb_speed = ttk.Combobox(
+            f_spd,
+            values=["Smooth (50 ms)", "Normal (30 ms)", "Fast (10 ms)", "Instant (0 ms)"],
+            textvariable=self.var_speed,
+            state="readonly",
+            width=15
+        )
+        self.cb_speed.pack(side="left")
+        self.cb_speed.bind("<<ComboboxSelected>>", self._on_speed_changed)
 
         self.progress_bar = ttk.Progressbar(
             prog_frame, mode="determinate", maximum=self.config.iterations, length=400
         )
-        self.progress_bar.pack(fill="x", pady=(2, 0))
+        self.progress_bar.pack(fill="x", pady=(4, 0))
 
     def _build_graph_section(self):
-        """Embedded matplotlib chart for dynamically showing ms/generation over time."""
+        """Embedded matplotlib chart for dynamically showing iterations vs time."""
         graph_frame = tk.Frame(self.main_frame, bg=BG_CARD, highlightbackground=BORDER_COLOR, highlightthickness=1)
         graph_frame.pack(fill="x", padx=20, pady=8)
 
         hdr_row = tk.Frame(graph_frame, bg=BG_CARD)
-        hdr_row.pack(fill="x", padx=12, pady=(8, 2))
+        hdr_row.pack(fill="x", padx=12, pady=(8, 4))
 
         tk.Label(
-            hdr_row, text="📊  Performance — ms / generation (Dynamic Process Graph)",
+            hdr_row, text="📊  Performance Graph — Iterations vs Time",
             font=("Segoe UI", 10, "bold"), fg=ACCENT_CYAN, bg=BG_CARD
         ).pack(side="left")
 
-        tk.Label(
-            hdr_row, text="Live step execution latency per generation",
-            font=("Segoe UI", 8), fg=TEXT_MUTED, bg=BG_CARD
-        ).pack(side="right")
+        # Interactive controls on right
+        ctrl_box = tk.Frame(hdr_row, bg=BG_CARD)
+        ctrl_box.pack(side="right")
 
-        self.fig = Figure(figsize=(9.5, 2.6), dpi=100, facecolor=BG_CARD)
+        # Metric dropdown
+        tk.Label(
+            ctrl_box, text="Y-Axis Metric:", font=("Segoe UI", 8, "bold"),
+            fg=TEXT_MUTED, bg=BG_CARD
+        ).pack(side="left", padx=(0, 4))
+
+        self.var_graph_mode = tk.StringVar(value="Iterations / Unit Time")
+        self.cb_graph_mode = ttk.Combobox(
+            ctrl_box,
+            values=["Iterations / Unit Time", "Iterations Completed vs Time"],
+            textvariable=self.var_graph_mode,
+            state="readonly",
+            width=25
+        )
+        self.cb_graph_mode.pack(side="left", padx=(0, 14))
+        self.cb_graph_mode.bind("<<ComboboxSelected>>", lambda e: self._on_graph_mode_changed())
+
+        # Time Unit Switcher: [ mS ] / [ S ]
+        tk.Label(
+            ctrl_box, text="Time Unit:", font=("Segoe UI", 8, "bold"),
+            fg=TEXT_MUTED, bg=BG_CARD
+        ).pack(side="left", padx=(0, 4))
+
+        self.btn_unit_ms = tk.Button(
+            ctrl_box, text="mS", font=("Segoe UI", 8, "bold"),
+            bg="#0284c7", fg="#ffffff", activebackground="#0369a1",
+            activeforeground="#ffffff", relief="flat", cursor="hand2",
+            padx=8, pady=2, command=lambda: self._set_time_unit("ms")
+        )
+        self.btn_unit_ms.pack(side="left", padx=(0, 2))
+
+        self.btn_unit_s = tk.Button(
+            ctrl_box, text="S", font=("Segoe UI", 8, "bold"),
+            bg=BTN_BG, fg=TEXT_SECONDARY, activebackground=BTN_HOVER,
+            activeforeground=TEXT_PRIMARY, relief="flat", cursor="hand2",
+            padx=8, pady=2, command=lambda: self._set_time_unit("s")
+        )
+        self.btn_unit_s.pack(side="left")
+
+        self.fig = Figure(figsize=(9.5, 2.7), dpi=100, facecolor=BG_CARD)
         self.ax = self.fig.add_subplot(111)
         self._style_axes()
-
-        self.line_cpu, = self.ax.plot([], [], color=GRAPH_CPU, linewidth=1.6, label="CPU (Normal Python)", alpha=0.95)
-        self.line_gpu, = self.ax.plot([], [], color=GRAPH_GPU, linewidth=1.6, label="CUDA (GPU Kernel)", alpha=0.95)
-        self.ax.legend(
-            loc="upper right", fontsize=8, framealpha=0.75,
-            facecolor=BG_PANEL, edgecolor=BORDER_COLOR, labelcolor=TEXT_PRIMARY
-        )
 
         self.fig_canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
         self.fig_canvas.get_tk_widget().pack(fill="x", padx=8, pady=(4, 8))
@@ -342,14 +399,52 @@ class ResultsWindow:
     def _style_axes(self):
         """Apply dark theme styling to matplotlib plot axes."""
         self.ax.set_facecolor(BG_PANEL)
-        self.ax.set_xlabel("Generation", fontsize=8, color=TEXT_SECONDARY)
-        self.ax.set_ylabel("ms / step", fontsize=8, color=TEXT_SECONDARY)
+        x_unit_str = "s" if self.time_unit == "s" else "ms"
+        y_unit_str = "iter/s" if self.time_unit == "s" else "iter/ms"
+
+        if self.graph_mode == "rate":
+            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=8, color=TEXT_SECONDARY)
+            self.ax.set_ylabel(f"Iterations / Unit Time ({y_unit_str})", fontsize=8, color=TEXT_SECONDARY)
+        else:
+            self.ax.set_xlabel(f"Elapsed Compute Time ({x_unit_str})", fontsize=8, color=TEXT_SECONDARY)
+            self.ax.set_ylabel("Iterations Completed", fontsize=8, color=TEXT_SECONDARY)
+
         self.ax.tick_params(colors=TEXT_SECONDARY, labelsize=7)
         for spine in self.ax.spines.values():
             spine.set_color(BORDER_COLOR)
-        self.ax.set_xlim(0, max(self.config.iterations, 10))
-        self.ax.set_ylim(0, 1.0)
         self.ax.grid(True, color=BORDER_COLOR, alpha=0.35, linewidth=0.5)
+
+    def _set_time_unit(self, unit: str):
+        """Switch graph time unit between 'ms' and 's' and redraw."""
+        self.time_unit = unit
+        if unit == "ms":
+            self.btn_unit_ms.config(bg="#0284c7", fg="#ffffff")
+            self.btn_unit_s.config(bg=BTN_BG, fg=TEXT_SECONDARY)
+        else:
+            self.btn_unit_s.config(bg="#0284c7", fg="#ffffff")
+            self.btn_unit_ms.config(bg=BTN_BG, fg=TEXT_SECONDARY)
+        self._update_graph()
+
+    def _on_graph_mode_changed(self):
+        """Update graph mode when changed from combobox."""
+        val = self.var_graph_mode.get()
+        if "Completed" in val:
+            self.graph_mode = "cumulative"
+        else:
+            self.graph_mode = "rate"
+        self._update_graph()
+
+    def _on_speed_changed(self, event=None):
+        """Update animation delay in milliseconds."""
+        val = self.var_speed.get()
+        if "50" in val:
+            self.animation_delay_ms = 50
+        elif "30" in val:
+            self.animation_delay_ms = 30
+        elif "10" in val:
+            self.animation_delay_ms = 10
+        elif "0" in val:
+            self.animation_delay_ms = 0
 
     def _build_stats_table(self):
         """
@@ -537,24 +632,34 @@ class ResultsWindow:
         """Poll the message queue on the main Tkinter thread."""
         self._process_queue()
         if not self._stop_event.is_set():
-            self._poll_job = self.win.after(20, self._schedule_poll)
+            self._poll_job = self.win.after(16, self._schedule_poll)
 
     def _process_queue(self):
         """Process pending simulation messages on the main thread."""
         try:
-            while True:
-                msg = self._queue.get_nowait()
+            # When animating, process 1 step per frame so every single generation is visibly rendered
+            max_steps = 1 if self.animation_delay_ms > 0 else 50
+            count = 0
+            while count < max_steps:
+                try:
+                    msg = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+
                 mtype = msg[0]
                 if mtype == "step":
                     _, gen, cpu_g, gpu_g, cpu_ms, gpu_ms = msg
                     self._on_step_complete(gen, cpu_g, gpu_g, cpu_ms, gpu_ms)
+                    count += 1
                 elif mtype == "done":
                     _, gpu_total_sec = msg
                     self._on_simulation_done(gpu_total_sec)
+                    return
                 elif mtype == "error":
                     _, err_msg = msg
                     self.lbl_status.config(text=f"❌ Error: {err_msg}", fg=ACCENT_RED)
-        except queue.Empty:
+                    return
+        except Exception:
             pass
 
     def _simulation_loop(self):
@@ -616,9 +721,9 @@ class ResultsWindow:
             # Enqueue update for UI thread
             self._queue.put(("step", step_idx, cpu_grid, gpu_grid, cpu_ms, gpu_ms))
 
-            # Small throttle to ensure smooth UI animation for very small grids
-            if cpu_ms + gpu_ms < 6.0:
-                time.sleep(0.006)
+            # Visual animation delay pacing (e.g. 30ms per generation for smooth animation)
+            if self.animation_delay_ms > 0:
+                time.sleep(self.animation_delay_ms / 1000.0)
 
         # Pure GPU transfer time without UI animation sleep
         bytes_transferred = config.grid_size * config.grid_size * 2
@@ -683,23 +788,66 @@ class ResultsWindow:
             pass
 
     def _update_graph(self):
-        """Redraw the dynamic matplotlib graph with latest per-step times."""
+        """Redraw matplotlib chart showing iterations vs time."""
         try:
-            if self.cpu_step_times:
-                x_cpu = list(range(1, len(self.cpu_step_times) + 1))
-                self.line_cpu.set_data(x_cpu, self.cpu_step_times)
+            self.ax.clear()
+            self._style_axes()
 
-            if self.gpu_step_times:
-                x_gpu = list(range(1, len(self.gpu_step_times) + 1))
-                self.line_gpu.set_data(x_gpu, self.gpu_step_times)
+            cum_cpu_ms = []
+            t_c = 0.0
+            for dt in self.cpu_step_times:
+                t_c += dt
+                cum_cpu_ms.append(t_c)
 
-            all_times = self.cpu_step_times + self.gpu_step_times
-            if all_times:
-                y_max = max(all_times) * 1.25
-                self.ax.set_ylim(0, max(y_max, 0.1))
+            cum_gpu_ms = []
+            t_g = 0.0
+            for dt in self.gpu_step_times:
+                t_g += dt
+                cum_gpu_ms.append(t_g)
 
-            x_max = max(len(self.cpu_step_times), len(self.gpu_step_times), 10)
-            self.ax.set_xlim(0, max(x_max, self.config.iterations))
+            is_sec = (self.time_unit == "s")
+            scale_t = 1000.0 if is_sec else 1.0
+
+            x_cpu = [t / scale_t for t in cum_cpu_ms]
+            x_gpu = [t / scale_t for t in cum_gpu_ms]
+
+            if self.graph_mode == "rate":
+                mult = 1000.0 if is_sec else 1.0
+                y_cpu = [mult / max(dt, 0.0001) for dt in self.cpu_step_times]
+                y_gpu = [mult / max(dt, 0.0001) for dt in self.gpu_step_times]
+                u_str = "iter/s" if is_sec else "iter/ms"
+            else:
+                y_cpu = list(range(1, len(x_cpu) + 1))
+                y_gpu = list(range(1, len(x_gpu) + 1))
+                u_str = "iters"
+
+            max_x = 0.001
+            max_y = 1.0
+
+            if x_cpu and y_cpu:
+                avg_c = sum(y_cpu) / len(y_cpu)
+                lbl_c = f"CPU (Python): avg {avg_c:,.1f} {u_str}" if self.graph_mode == "rate" else f"CPU ({len(x_cpu)} iters)"
+                self.ax.plot(x_cpu, y_cpu, color=GRAPH_CPU, linewidth=1.8, label=lbl_c, alpha=0.95)
+                max_x = max(max_x, max(x_cpu))
+                max_y = max(max_y, max(y_cpu))
+
+            if x_gpu and y_gpu:
+                avg_g = sum(y_gpu) / len(y_gpu)
+                lbl_g = f"CUDA (GPU): avg {avg_g:,.1f} {u_str}" if self.graph_mode == "rate" else f"CUDA ({len(x_gpu)} iters)"
+                self.ax.plot(x_gpu, y_gpu, color=GRAPH_GPU, linewidth=1.8, label=lbl_g, alpha=0.95)
+                max_x = max(max_x, max(x_gpu))
+                max_y = max(max_y, max(y_gpu))
+
+            if max_x > 0:
+                self.ax.set_xlim(0, max_x * 1.08)
+            if max_y > 0:
+                self.ax.set_ylim(0, max_y * 1.15)
+
+            if x_cpu or x_gpu:
+                self.ax.legend(
+                    loc="upper right", fontsize=8, framealpha=0.85,
+                    facecolor=BG_PANEL, edgecolor=BORDER_COLOR, labelcolor=TEXT_PRIMARY
+                )
 
             self.fig_canvas.draw_idle()
         except Exception:
@@ -911,11 +1059,7 @@ class ResultsWindow:
         self.lbl_gpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step")
 
         # Reset graph
-        self.line_cpu.set_data([], [])
-        self.line_gpu.set_data([], [])
-        self.ax.set_ylim(0, 1.0)
-        self.ax.set_xlim(0, max(self.config.iterations, 10))
-        self.fig_canvas.draw_idle()
+        self._update_graph()
 
         # Reset table rows back to initial values
         hw = get_hardware_info()
