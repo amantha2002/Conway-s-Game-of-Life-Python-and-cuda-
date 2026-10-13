@@ -30,6 +30,8 @@ from src.gui.results_window import ResultsWindow
 class GameOfLifeSettingsWindow:
     """Tkinter Desktop Window with top settings and bottom real-time preview."""
 
+    CANVAS_SIZE = 240
+
     def __init__(
         self,
         root: Optional[tk.Tk] = None,
@@ -37,8 +39,17 @@ class GameOfLifeSettingsWindow:
     ):
         self.root = root if root is not None else tk.Tk()
         self.root.title("Conway's Game of Life — HPC Settings & Preview")
-        self.root.geometry("660x860")
-        self.root.minsize(600, 760)
+
+        # Responsive initial dimensions calculated to fit safely inside screen bounds
+        # Automatically accounts for 1080p displays with 125%/150% scaling (864px/720px height)
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        win_w = min(620, max(520, screen_w - 60))
+        win_h = min(660, max(500, screen_h - 120))
+        pos_x = max(0, (screen_w - win_w) // 2)
+        pos_y = max(0, (screen_h - win_h) // 2 - 20)
+        self.root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+        self.root.minsize(480, 420)
         self.root.configure(bg="#121316")
 
         self.on_run_callback = on_run_callback
@@ -48,11 +59,22 @@ class GameOfLifeSettingsWindow:
 
         # Build UI
         self._init_styles()
+
+        # 1. Action panel PINNED at the bottom first:
+        # Tkinter pack order ensures bottom-pinned widgets NEVER disappear or get squeezed out when resized.
+        self._build_action_panel()
+
+        # 2. Responsive scrollable container occupying all remaining upper window space
+        self._build_scrollable_container()
+
+        # 3. Mount content panels inside the scrollable content frame
         self._build_header()
         self._build_cuda_status_panel()
         self._build_settings_panel()
         self._build_preview_panel()
-        self._build_action_panel()
+
+        # 4. Bind mouse wheel scrolling across the entire window
+        self._bind_mousewheel()
 
         # Initial preview rendering & automatic initial CUDA detection
         self.update_preview()
@@ -75,9 +97,98 @@ class GameOfLifeSettingsWindow:
 
         style.configure("TScale", background="#18191e", troughcolor="#27272a")
 
+        # Dark theme scrollbar styling
+        style.configure(
+            "Vertical.TScrollbar",
+            gripcount=0,
+            background="#1e2026",
+            darkcolor="#1e2026",
+            lightcolor="#1e2026",
+            troughcolor="#121316",
+            bordercolor="#18191e",
+            arrowcolor="#64748b"
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", "#2d3748"), ("pressed", "#38bdf8")]
+        )
+
+    def _build_scrollable_container(self):
+        """Scrollable container so all settings and preview remain accessible on any display size."""
+        self.container = tk.Frame(self.root, bg="#121316")
+        self.container.pack(side="top", fill="both", expand=True)
+
+        self.canvas = tk.Canvas(
+            self.container,
+            bg="#121316",
+            highlightthickness=0,
+            bd=0
+        )
+        self.scrollbar = ttk.Scrollbar(
+            self.container,
+            orient="vertical",
+            style="Vertical.TScrollbar",
+            command=self.canvas.yview
+        )
+        self.content_frame = tk.Frame(self.canvas, bg="#121316")
+
+        # Dynamically compute scrollable region whenever content size updates
+        self.content_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas_window_id = self.canvas.create_window(
+            (0, 0), window=self.content_frame, anchor="nw"
+        )
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        # Expand content frame width when window/canvas width changes
+        def _on_canvas_configure(event):
+            self.canvas.itemconfig(self.canvas_window_id, width=event.width)
+
+        self.canvas.bind("<Configure>", _on_canvas_configure)
+
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+    def _bind_mousewheel(self):
+        """Enable mouse wheel scrolling smoothly across the window."""
+        def _on_mousewheel(event):
+            try:
+                if not hasattr(self, "canvas") or not self.canvas.winfo_exists():
+                    return
+                # Do not intercept wheel if inside an active combobox dropdown
+                widget = event.widget
+                if isinstance(widget, (ttk.Combobox, tk.Listbox)) and widget.focus_get() == widget:
+                    return
+                if event.delta:
+                    self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                elif event.num == 4:
+                    self.canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    self.canvas.yview_scroll(1, "units")
+            except Exception:
+                pass
+
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<Button-4>", _on_mousewheel)
+        self.root.bind_all("<Button-5>", _on_mousewheel)
+
+        def _on_destroy(event):
+            if event.widget == self.root:
+                try:
+                    self.root.unbind_all("<MouseWheel>")
+                    self.root.unbind_all("<Button-4>")
+                    self.root.unbind_all("<Button-5>")
+                except Exception:
+                    pass
+
+        self.root.bind("<Destroy>", _on_destroy)
+
     def _build_header(self):
-        header_frame = tk.Frame(self.root, bg="#121316")
-        header_frame.pack(fill="x", padx=16, pady=(12, 6))
+        header_frame = tk.Frame(self.content_frame, bg="#121316")
+        header_frame.pack(fill="x", padx=14, pady=(8, 4))
 
         title = ttk.Label(header_frame, text="Conway's Game of Life", style="Header.TLabel")
         title.pack(anchor="w")
@@ -92,9 +203,9 @@ class GameOfLifeSettingsWindow:
     def _build_cuda_status_panel(self):
         """Card containing the 'Check CUDA Available' button and live status display."""
         cuda_card = ttk.LabelFrame(
-            self.root, text=" ⚡ CUDA Hardware Acceleration ", style="Section.TLabelframe", padding=10
+            self.content_frame, text=" ⚡ CUDA Hardware Acceleration ", style="Section.TLabelframe", padding=10
         )
-        cuda_card.pack(fill="x", padx=16, pady=(4, 6))
+        cuda_card.pack(fill="x", padx=14, pady=(4, 6))
 
         content = tk.Frame(cuda_card, bg="#18191e")
         content.pack(fill="x")
@@ -249,8 +360,8 @@ class GameOfLifeSettingsWindow:
 
     def _build_settings_panel(self):
         """Top snippet: Settings frame containing all required controls."""
-        settings_frame = ttk.LabelFrame(self.root, text=" ⚙ Configuration Settings ", style="Section.TLabelframe", padding=10)
-        settings_frame.pack(fill="x", padx=16, pady=6)
+        settings_frame = ttk.LabelFrame(self.content_frame, text=" ⚙ Configuration Settings ", style="Section.TLabelframe", padding=8)
+        settings_frame.pack(fill="x", padx=14, pady=(4, 6))
 
         # 3-column responsive grid layout
         settings_frame.columnconfigure(0, weight=1)
@@ -385,8 +496,8 @@ class GameOfLifeSettingsWindow:
 
     def _build_preview_panel(self):
         """Below snippet: Real-time preview canvas of the starting grid state."""
-        preview_frame = ttk.LabelFrame(self.root, text=" 👁 Initial State Preview ", style="Section.TLabelframe", padding=8)
-        preview_frame.pack(fill="both", expand=True, padx=16, pady=6)
+        preview_frame = ttk.LabelFrame(self.content_frame, text=" 👁 Initial State Preview ", style="Section.TLabelframe", padding=8)
+        preview_frame.pack(fill="x", padx=14, pady=(4, 6))
 
         # Stats banner
         self.lbl_stats = ttk.Label(
@@ -399,16 +510,21 @@ class GameOfLifeSettingsWindow:
 
         # Canvas for the live image
         self.preview_canvas = tk.Canvas(
-            preview_frame, width=320, height=320, bg="#18181b", highlightthickness=1, highlightbackground="#27272a"
+            preview_frame, width=self.CANVAS_SIZE, height=self.CANVAS_SIZE,
+            bg="#18181b", highlightthickness=1, highlightbackground="#27272a"
         )
         self.preview_canvas.pack(pady=4)
 
     def _build_action_panel(self):
-        """Action button section with the requested Run button."""
+        """Action button section with the requested Run button pinned to the bottom."""
         action_frame = tk.Frame(self.root, bg="#121316")
-        action_frame.pack(fill="x", padx=16, pady=(6, 14))
+        action_frame.pack(side="bottom", fill="x", padx=14, pady=(4, 10))
 
-        # Run button
+        # Subtle divider separating settings from action footer
+        sep = tk.Frame(action_frame, height=1, bg="#27272a")
+        sep.pack(fill="x", pady=(0, 6))
+
+        # Run button — pinned and always visible
         self.btn_run = tk.Button(
             action_frame,
             text="▶  RUN SIMULATION / BENCHMARK",
@@ -423,7 +539,7 @@ class GameOfLifeSettingsWindow:
             pady=8,
             command=self._on_run_click
         )
-        self.btn_run.pack(fill="x", pady=4)
+        self.btn_run.pack(fill="x", pady=(2, 4))
 
         # Status output line
         self.lbl_run_status = ttk.Label(
@@ -465,10 +581,14 @@ class GameOfLifeSettingsWindow:
             )
 
             # Render image
-            pil_img = render_preview_image(self.current_grid, target_size=320)
+            pil_img = render_preview_image(self.current_grid, target_size=self.CANVAS_SIZE)
             self.photo_img = ImageTk.PhotoImage(pil_img)
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(160, 160, image=self.photo_img)
+            self.preview_canvas.create_image(
+                self.CANVAS_SIZE // 2,
+                self.CANVAS_SIZE // 2,
+                image=self.photo_img
+            )
 
         except Exception as e:
             self.lbl_stats.config(text=f"Preview Error: {e}")
