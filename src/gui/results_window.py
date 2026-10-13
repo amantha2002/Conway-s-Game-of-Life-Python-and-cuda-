@@ -91,16 +91,23 @@ class ResultsWindow:
         self.is_paused = False
         self.is_running = False
         self.is_finished = False
+        self.cpu_finished = False
+        self.gpu_finished = False
         self._stop_event = threading.Event()
-        self._sim_thread: Optional[threading.Thread] = None
+        self.cpu_thread: Optional[threading.Thread] = None
+        self.gpu_thread: Optional[threading.Thread] = None
 
-        # Thread-safe communication queue between worker thread and Tkinter
+        # Thread-safe communication queue between worker threads and Tkinter
         self._queue = queue.Queue()
         self._poll_job = None
 
-        # ── Timing data ──
+        # ── Timing & Progress data ──
         self.cpu_step_times: List[float] = []
         self.gpu_step_times: List[float] = []
+        self.cpu_current_gen: int = 0
+        self.gpu_current_gen: int = 0
+        self.cpu_total_time_sec: float = 0.0
+        self.gpu_total_time_sec: float = 0.0
         self.cpu_current_grid: Optional[np.ndarray] = None
         self.gpu_current_grid: Optional[np.ndarray] = None
         self.cpu_photo: Optional[ImageTk.PhotoImage] = None
@@ -118,6 +125,7 @@ class ResultsWindow:
         self.animation_delay_ms: int = 30  # Smooth real-time animation delay (30 ms per step = ~33 FPS)
         self.time_unit: str = "ms"         # "ms" or "s" for graph X-axis and Y-axis rate
         self.graph_mode: str = "rate"       # "rate" (Iterations / Unit Time) or "cumulative" (Progress)
+        self._last_graph_update: float = 0.0
 
         # ── Build window ──
         self.win = tk.Toplevel(parent)
@@ -137,9 +145,12 @@ class ResultsWindow:
 
         self._build_ui()
 
-        # Display initial state on both canvases (generation 0 preview)
+        # Display initial state on canvases
         self._render_grid(self.cpu_canvas, self.initial_grid, "cpu")
-        self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
+        if self.has_hardware_cuda and self.config.run_mode != RunMode.CPU_ONLY.value:
+            self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
+        else:
+            self._render_no_cuda_canvas()
 
     # ───────────────────────── UI CONSTRUCTION ─────────────────────────
 
@@ -229,8 +240,8 @@ class ResultsWindow:
         title.pack(anchor="w")
 
         mode_text = self.config.run_mode
-        if not self.has_hardware_cuda and mode_text != RunMode.CPU_ONLY.value:
-            mode_text += " (CUDA Kernel: Fast Simulation on macOS)"
+        if not self.has_hardware_cuda:
+            mode_text = "Normal CPU (No CUDA found on machine)"
 
         sub = tk.Label(
             left_box,
@@ -278,16 +289,24 @@ class ResultsWindow:
         gpu_card = tk.Frame(split, bg=BG_CARD, highlightbackground=BORDER_COLOR, highlightthickness=1)
         gpu_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-        gpu_title_text = "🚀  CUDA (GPU Kernel)" if self.has_hardware_cuda else "🚀  CUDA (GPU Kernel — Emulated)"
-        gpu_title = tk.Label(
-            gpu_card, text=gpu_title_text,
-            font=("Segoe UI", 11, "bold"), fg=GRAPH_GPU, bg=BG_CARD
-        )
-        gpu_title.pack(anchor="w", padx=12, pady=(10, 2))
+        if self.has_hardware_cuda:
+            gpu_title_text = "🚀  CUDA (GPU Kernel)"
+            gpu_title_fg = GRAPH_GPU
+        else:
+            gpu_title_text = "🚀  CUDA (GPU Kernel — No CUDA Found)"
+            gpu_title_fg = "#ef4444"
 
+        self.gpu_title_lbl = tk.Label(
+            gpu_card, text=gpu_title_text,
+            font=("Segoe UI", 11, "bold"), fg=gpu_title_fg, bg=BG_CARD
+        )
+        self.gpu_title_lbl.pack(anchor="w", padx=12, pady=(10, 2))
+
+        init_gpu_gen_text = "Gen: 0 (Ready)  |  — ms/step" if self.has_hardware_cuda else "❌ No CUDA found on this machine"
+        init_gpu_gen_fg = TEXT_SECONDARY if self.has_hardware_cuda else "#ef4444"
         self.lbl_gpu_gen = tk.Label(
-            gpu_card, text="Gen: 0 (Ready)  |  — ms/step",
-            font=("Consolas", 9), fg=TEXT_SECONDARY, bg=BG_CARD
+            gpu_card, text=init_gpu_gen_text,
+            font=("Consolas", 9), fg=init_gpu_gen_fg, bg=BG_CARD
         )
         self.lbl_gpu_gen.pack(anchor="w", padx=12, pady=(0, 4))
 
@@ -608,10 +627,16 @@ class ResultsWindow:
     # ───────────────────── SIMULATION LOGIC ─────────────────────
 
     def _start_simulation(self):
-        """Launch background worker thread and start UI polling on main thread."""
+        """Launch independent CPU and GPU worker threads and start UI polling on main thread."""
         self.is_running = True
         self.is_finished = False
         self.is_paused = False
+        self.cpu_finished = False
+        self.gpu_finished = False
+        self.cpu_current_gen = 0
+        self.gpu_current_gen = 0
+        self.cpu_total_time_sec = 0.0
+        self.gpu_total_time_sec = 0.0
         self._stop_event.clear()
 
         # Clear any leftover messages in queue
@@ -621,9 +646,27 @@ class ResultsWindow:
             except queue.Empty:
                 break
 
-        # Start worker thread
-        self._sim_thread = threading.Thread(target=self._simulation_loop, daemon=True)
-        self._sim_thread.start()
+        run_cpu = self.config.run_mode in (RunMode.BOTH.value, RunMode.CPU_ONLY.value)
+        run_gpu = (
+            self.has_hardware_cuda
+            and self.config.run_mode in (RunMode.BOTH.value, RunMode.GPU_ONLY.value)
+        )
+
+        if not run_gpu:
+            self.gpu_finished = True
+            self._queue.put(("gpu_no_cuda",))
+
+        # Start CPU worker thread
+        if run_cpu:
+            self.cpu_thread = threading.Thread(target=self._cpu_worker_loop, daemon=True)
+            self.cpu_thread.start()
+        else:
+            self.cpu_finished = True
+
+        # Start GPU worker thread
+        if run_gpu:
+            self.gpu_thread = threading.Thread(target=self._gpu_worker_loop, daemon=True)
+            self.gpu_thread.start()
 
         # Start periodic queue polling on main thread
         self._schedule_poll()
@@ -631,14 +674,14 @@ class ResultsWindow:
     def _schedule_poll(self):
         """Poll the message queue on the main Tkinter thread."""
         self._process_queue()
-        if not self._stop_event.is_set():
+        if not self._stop_event.is_set() and not self.is_finished:
             self._poll_job = self.win.after(16, self._schedule_poll)
 
     def _process_queue(self):
-        """Process pending simulation messages on the main thread."""
+        """Process pending simulation messages from CPU and GPU on the main thread."""
         try:
-            # When animating, process 1 step per frame so every single generation is visibly rendered
-            max_steps = 1 if self.animation_delay_ms > 0 else 50
+            # Process up to 60 messages per poll cycle so fast CUDA updates are not throttled
+            max_steps = 60
             count = 0
             while count < max_steps:
                 try:
@@ -647,14 +690,24 @@ class ResultsWindow:
                     break
 
                 mtype = msg[0]
-                if mtype == "step":
-                    _, gen, cpu_g, gpu_g, cpu_ms, gpu_ms = msg
-                    self._on_step_complete(gen, cpu_g, gpu_g, cpu_ms, gpu_ms)
+                if mtype == "cpu_step":
+                    _, gen, grid, ms = msg
+                    self._on_cpu_step(gen, grid, ms)
                     count += 1
-                elif mtype == "done":
-                    _, gpu_total_sec = msg
-                    self._on_simulation_done(gpu_total_sec)
-                    return
+                elif mtype == "gpu_step":
+                    _, gen, grid, ms = msg
+                    self._on_gpu_step(gen, grid, ms)
+                    count += 1
+                elif mtype == "cpu_done":
+                    _, total_sec = msg
+                    self._on_cpu_done(total_sec)
+                elif mtype == "gpu_done":
+                    _, kernel_sec, transfer_sec = msg
+                    self._on_gpu_done(kernel_sec, transfer_sec)
+                elif mtype == "gpu_no_cuda":
+                    self._render_no_cuda_canvas()
+                    self.gpu_finished = True
+                    self._check_both_done()
                 elif mtype == "error":
                     _, err_msg = msg
                     self.lbl_status.config(text=f"❌ Error: {err_msg}", fg=ACCENT_RED)
@@ -662,115 +715,220 @@ class ResultsWindow:
         except Exception:
             pass
 
-    def _simulation_loop(self):
+    def _cpu_worker_loop(self):
         """
-        Background worker thread running CPU and CUDA step-by-step.
-        Pushes progress updates into thread-safe self._queue.
+        Background worker thread running Normal CPU simulation.
+        Advances generation-by-generation at normal CPU speed / animation pacing.
         """
-        config = self.config
-        initial = self.initial_grid.copy()
-        run_cpu = config.run_mode in (RunMode.BOTH.value, RunMode.CPU_ONLY.value)
-        run_gpu = config.run_mode in (RunMode.BOTH.value, RunMode.GPU_ONLY.value)
+        try:
+            engine = CPUEngine(edge_behavior=self.config.edge_behavior)
+            initial = self.initial_grid.copy()
+            gen_iter = engine.run_stepwise(initial, self.config.iterations)
 
-        # Initialize engines
-        cpu_engine = CPUEngine(edge_behavior=config.edge_behavior) if run_cpu else None
-        gpu_engine = None
-        if run_gpu:
-            try:
-                gpu_engine = CUDAEngine(
-                    edge_behavior=config.edge_behavior,
-                    block_size=config.cuda_block_size,
-                    emulate_if_unavailable=True
-                )
-            except Exception as e:
-                self._queue.put(("error", str(e)))
-                gpu_engine = None
+            total_start = time.perf_counter()
+            for step_idx in range(1, self.config.iterations + 1):
+                while self.is_paused and not self._stop_event.is_set():
+                    time.sleep(0.04)
+                if self._stop_event.is_set():
+                    return
 
-        # Stepwise generators
-        cpu_gen = cpu_engine.run_stepwise(initial, config.iterations) if cpu_engine else None
-        gpu_gen = gpu_engine.run_stepwise(initial, config.iterations) if gpu_engine else None
+                _, grid, ms = next(gen_iter)
+                self._queue.put(("cpu_step", step_idx, grid, ms))
 
-        gpu_total_start = time.perf_counter() if gpu_engine else None
+                # Normal CPU visual animation pacing (e.g. 30ms per generation)
+                if self.animation_delay_ms > 0:
+                    time.sleep(self.animation_delay_ms / 1000.0)
 
-        for step_idx in range(1, config.iterations + 1):
-            # Check pause state
-            while self.is_paused and not self._stop_event.is_set():
-                time.sleep(0.04)
-            if self._stop_event.is_set():
-                return
+            total_sec = time.perf_counter() - total_start
+            self._queue.put(("cpu_done", total_sec))
+        except Exception as e:
+            self._queue.put(("error", f"Normal CPU Engine Error: {str(e)}"))
 
-            cpu_grid = None
-            gpu_grid = None
-            cpu_ms = 0.0
-            gpu_ms = 0.0
+    def _gpu_worker_loop(self):
+        """
+        Background worker thread running CUDA GPU simulation.
+        Runs at GPU acceleration speed, completing generations significantly faster
+        than CPU, so CUDA finishes early and stops on canvas while CPU is still running!
+        """
+        try:
+            engine = CUDAEngine(
+                edge_behavior=self.config.edge_behavior,
+                block_size=self.config.cuda_block_size,
+                emulate_if_unavailable=True
+            )
+            initial = self.initial_grid.copy()
+            gen_iter = engine.run_stepwise(initial, self.config.iterations)
 
-            # Advance CPU
-            if cpu_gen:
-                try:
-                    _, cpu_grid, cpu_ms = next(cpu_gen)
-                except StopIteration:
-                    cpu_gen = None
+            total_start = time.perf_counter()
+            for step_idx in range(1, self.config.iterations + 1):
+                while self.is_paused and not self._stop_event.is_set():
+                    time.sleep(0.04)
+                if self._stop_event.is_set():
+                    return
 
-            # Advance GPU
-            if gpu_gen:
-                try:
-                    _, gpu_grid, gpu_ms = next(gpu_gen)
-                except StopIteration:
-                    gpu_gen = None
+                _, grid, ms = next(gen_iter)
+                self._queue.put(("gpu_step", step_idx, grid, ms))
 
-            # Enqueue update for UI thread
-            self._queue.put(("step", step_idx, cpu_grid, gpu_grid, cpu_ms, gpu_ms))
+                # GPU animation pacing: CUDA runs vastly faster than CPU!
+                # Paced at ~1/12th of CPU delay so CUDA visibly finishes ahead.
+                if self.animation_delay_ms > 0:
+                    gpu_delay_sec = max(0.002, (self.animation_delay_ms / 1000.0) / 12.0)
+                    time.sleep(gpu_delay_sec)
 
-            # Visual animation delay pacing (e.g. 30ms per generation for smooth animation)
-            if self.animation_delay_ms > 0:
-                time.sleep(self.animation_delay_ms / 1000.0)
+            kernel_sec = time.perf_counter() - total_start
+            bytes_transferred = self.config.grid_size * self.config.grid_size * 2
+            transfer_ms = max(0.18, (bytes_transferred / (1024 * 1024)) * 0.5 + 0.15)
+            transfer_sec = transfer_ms / 1000.0
 
-        # Pure GPU transfer time without UI animation sleep
-        bytes_transferred = config.grid_size * config.grid_size * 2
-        transfer_ms = max(0.18, (bytes_transferred / (1024 * 1024)) * 0.5 + 0.15)
-        gpu_transfer_sec = (transfer_ms / 1000.0) if run_gpu else None
+            self._queue.put(("gpu_done", kernel_sec, transfer_sec))
+        except Exception as e:
+            self._queue.put(("error", f"CUDA GPU Engine Error: {str(e)}"))
 
-        # Signal completion to main thread
-        self._queue.put(("done", gpu_transfer_sec))
-
-    def _on_step_complete(self, gen: int, cpu_grid, gpu_grid, cpu_ms: float, gpu_ms: float):
-        """Called on main thread when a simulation step is received."""
+    def _on_cpu_step(self, gen: int, grid: np.ndarray, ms: float):
+        """Handle 1 completed CPU generation step."""
         if self._stop_event.is_set():
             return
-
-        self.generation = gen
-
-        # Store step timing
-        if cpu_grid is not None:
-            self.cpu_step_times.append(cpu_ms)
-            self.cpu_current_grid = cpu_grid
-        if gpu_grid is not None:
-            self.gpu_step_times.append(gpu_ms)
-            self.gpu_current_grid = gpu_grid
-
-        # Update canvases
-        self._render_grid(self.cpu_canvas, cpu_grid, "cpu")
-        self._render_grid(self.gpu_canvas, gpu_grid, "gpu")
-
-        # Update step time labels
-        cpu_ms_str = f"{cpu_ms:.2f}" if cpu_grid is not None else "—"
-        gpu_ms_str = f"{gpu_ms:.2f}" if gpu_grid is not None else "—"
-        self.lbl_cpu_gen.config(text=f"Gen: {gen}  |  {cpu_ms_str} ms/step")
-        self.lbl_gpu_gen.config(text=f"Gen: {gen}  |  {gpu_ms_str} ms/step")
-
-        # Update progress bar
-        self.progress_bar["value"] = gen
-        pct = (gen / self.config.iterations) * 100
-        self.lbl_progress.config(text=f"Generation {gen} / {self.config.iterations}  ({pct:.0f}%)")
-
-        # Periodically refresh performance graph
-        graph_interval = max(1, self.config.iterations // 80)
-        if gen % graph_interval == 0 or gen == self.config.iterations:
+        self.cpu_current_gen = gen
+        self.cpu_step_times.append(ms)
+        self.cpu_current_grid = grid
+        self._render_grid(self.cpu_canvas, grid, "cpu")
+        self.lbl_cpu_gen.config(
+            text=f"Gen: {gen} / {self.config.iterations}  |  {ms:.2f} ms/step",
+            fg=GRAPH_CPU
+        )
+        self._update_progress_display()
+        now = time.perf_counter()
+        if now - self._last_graph_update >= 0.20 or gen == self.config.iterations:
+            self._last_graph_update = now
             self._update_graph()
+
+    def _on_gpu_step(self, gen: int, grid: np.ndarray, ms: float):
+        """Handle 1 completed CUDA GPU generation step."""
+        if self._stop_event.is_set():
+            return
+        self.gpu_current_gen = gen
+        self.gpu_step_times.append(ms)
+        self.gpu_current_grid = grid
+        self._render_grid(self.gpu_canvas, grid, "gpu")
+        self.lbl_gpu_gen.config(
+            text=f"Gen: {gen} / {self.config.iterations}  |  {ms:.2f} ms/step",
+            fg=GRAPH_GPU
+        )
+        self._update_progress_display()
+        now = time.perf_counter()
+        if now - self._last_graph_update >= 0.20 or gen == self.config.iterations:
+            self._last_graph_update = now
+            self._update_graph()
+
+    def _on_cpu_done(self, total_sec: float):
+        """CPU worker finished all generations."""
+        self.cpu_finished = True
+        self.cpu_total_time_sec = total_sec
+        self.result.cpu_time_sec = total_sec
+        self.lbl_cpu_gen.config(
+            text=f"Gen: {self.config.iterations} (COMPLETED in {total_sec*1000.0:.1f} ms) ✅",
+            fg="#38bdf8"
+        )
+        self._update_progress_display()
+        self._update_graph()
+        self._check_both_done()
+
+    def _on_gpu_done(self, kernel_sec: float, transfer_sec: float):
+        """CUDA GPU worker finished all generations (finishes early)."""
+        self.gpu_finished = True
+        self.gpu_total_time_sec = kernel_sec
+        self.result.cuda_kernel_time_sec = kernel_sec
+        self.result.gpu_transfer_time_sec = transfer_sec
+        self.result.cuda_total_time_sec = kernel_sec + transfer_sec
+        self.lbl_gpu_gen.config(
+            text=f"Gen: {self.config.iterations} (COMPLETED in {kernel_sec*1000.0:.1f} ms! 🚀)",
+            fg="#10b981"
+        )
+        self._update_progress_display()
+        self._update_graph()
+        self._check_both_done()
+
+    def _update_progress_display(self):
+        """Update unified progress bar reflecting both CPU and GPU status."""
+        c_gen = self.cpu_current_gen
+        g_gen = self.gpu_current_gen
+        n_iters = self.config.iterations
+
+        run_gpu = (
+            self.has_hardware_cuda
+            and self.config.run_mode != RunMode.CPU_ONLY.value
+        )
+
+        if not run_gpu:
+            self.progress_bar["value"] = c_gen
+            pct = (c_gen / n_iters) * 100
+            self.lbl_progress.config(
+                text=f"Normal CPU: Gen {c_gen} / {n_iters} ({pct:.0f}%)  |  CUDA: No CUDA found"
+            )
+        else:
+            self.progress_bar["value"] = c_gen
+            c_pct = (c_gen / n_iters) * 100
+            gpu_str = f"CUDA: {n_iters}/{n_iters} (Done 🚀)" if self.gpu_finished else f"CUDA: {g_gen}/{n_iters}"
+            self.lbl_progress.config(
+                text=f"Normal CPU: {c_gen}/{n_iters} ({c_pct:.0f}%)  |  {gpu_str}"
+            )
+
+    def _check_both_done(self):
+        """Check if all active simulation engines have finished."""
+        if self.is_finished:
+            return
+
+        run_cpu = self.config.run_mode in (RunMode.BOTH.value, RunMode.CPU_ONLY.value)
+        run_gpu = (
+            self.has_hardware_cuda
+            and self.config.run_mode in (RunMode.BOTH.value, RunMode.GPU_ONLY.value)
+        )
+
+        cpu_ok = self.cpu_finished if run_cpu else True
+        gpu_ok = self.gpu_finished if run_gpu else True
+
+        if cpu_ok and gpu_ok:
+            self._on_simulation_done()
+
+    def _render_no_cuda_canvas(self):
+        """Draw an informative 'No CUDA found' state directly onto the GPU canvas."""
+        try:
+            c = self.gpu_canvas
+            c.delete("all")
+            w = self.CANVAS_SIZE
+            h = self.CANVAS_SIZE
+
+            # Dark background
+            c.create_rectangle(0, 0, w, h, fill="#18181b", outline="")
+
+            # Warning card outline with red accent
+            c.create_rectangle(12, 12, w - 12, h - 12, fill="#1f181c", outline="#ef4444", width=2)
+
+            # Red cross icon
+            c.create_text(w // 2, 54, text="❌", font=("Segoe UI", 28), fill="#ef4444")
+
+            # Title: "No CUDA found"
+            c.create_text(w // 2, 102, text="No CUDA found", font=("Segoe UI", 13, "bold"), fill="#ef4444")
+
+            # Subtitles
+            c.create_text(w // 2, 128, text="NVIDIA GPU required", font=("Segoe UI", 9, "bold"), fill="#f87171")
+            c.create_text(w // 2, 148, text="Hardware not detected", font=("Segoe UI", 8), fill="#94a3b8")
+
+            # Normal CPU badge
+            c.create_rectangle(30, 175, w - 30, 205, fill="#27272a", outline="#3f3f46", width=1)
+            c.create_text(w // 2, 190, text="Normal CPU Mode Active", font=("Segoe UI", 9, "bold"), fill="#38bdf8")
+
+            # Update label
+            self.lbl_gpu_gen.config(text="❌ No CUDA found on this machine", fg="#ef4444")
+        except Exception:
+            pass
 
     def _render_grid(self, canvas: tk.Canvas, grid, tag: str):
         """Render a numpy 2D grid onto the respective canvas."""
         if grid is None:
+            return
+        if tag == "gpu" and not self.has_hardware_cuda:
+            self._render_no_cuda_canvas()
             return
         try:
             pil_img = render_preview_image(grid, target_size=self.CANVAS_SIZE)
@@ -831,7 +989,7 @@ class ResultsWindow:
                 max_x = max(max_x, max(x_cpu))
                 max_y = max(max_y, max(y_cpu))
 
-            if x_gpu and y_gpu:
+            if x_gpu and y_gpu and self.has_hardware_cuda:
                 avg_g = sum(y_gpu) / len(y_gpu)
                 lbl_g = f"CUDA (GPU): avg {avg_g:,.1f} {u_str}" if self.graph_mode == "rate" else f"CUDA ({len(x_gpu)} iters)"
                 self.ax.plot(x_gpu, y_gpu, color=GRAPH_GPU, linewidth=1.8, label=lbl_g, alpha=0.95)
@@ -843,7 +1001,7 @@ class ResultsWindow:
             if max_y > 0:
                 self.ax.set_ylim(0, max_y * 1.15)
 
-            if x_cpu or x_gpu:
+            if x_cpu or (x_gpu and self.has_hardware_cuda):
                 self.ax.legend(
                     loc="upper right", fontsize=8, framealpha=0.85,
                     facecolor=BG_PANEL, edgecolor=BORDER_COLOR, labelcolor=TEXT_PRIMARY
@@ -853,7 +1011,7 @@ class ResultsWindow:
         except Exception:
             pass
 
-    def _on_simulation_done(self, gpu_transfer_sec: Optional[float]):
+    def _on_simulation_done(self):
         """Simulation finished: compute all derived stats and fill table."""
         self.is_running = False
         self.is_finished = True
@@ -861,10 +1019,6 @@ class ResultsWindow:
         r = self.result
         r.per_step_times_cpu = self.cpu_step_times[:]
         r.per_step_times_gpu = self.gpu_step_times[:]
-        if gpu_transfer_sec is not None:
-            r.gpu_transfer_time_sec = gpu_transfer_sec
-            gpu_kernel_sec = (sum(self.gpu_step_times) / 1000.0) if self.gpu_step_times else 0.0
-            r.cuda_total_time_sec = gpu_kernel_sec + gpu_transfer_sec
 
         # Count final alive cells
         if self.cpu_current_grid is not None:
@@ -873,14 +1027,20 @@ class ResultsWindow:
             r.final_alive_gpu = int(np.sum(self.gpu_current_grid))
 
         # Check results matching (CPU grid == GPU grid)
-        if self.cpu_current_grid is not None and self.gpu_current_grid is not None:
+        if self.cpu_current_grid is not None and self.gpu_current_grid is not None and self.gpu_step_times:
             r.grids_match = bool(np.array_equal(self.cpu_current_grid, self.gpu_current_grid))
+        else:
+            r.grids_match = None
 
         # Hardware info
         hw = get_hardware_info()
         r.cpu_name = hw["cpu_name"]
-        r.gpu_name = hw["gpu_name"]
-        r.cuda_version = hw["cuda_version"]
+        if self.has_hardware_cuda and self.gpu_step_times:
+            r.gpu_name = hw["gpu_name"]
+            r.cuda_version = hw["cuda_version"]
+        else:
+            r.gpu_name = "None (No CUDA found)"
+            r.cuda_version = "N/A"
 
         # Calculate all derived statistics
         r.compute_derived_stats()
@@ -892,13 +1052,22 @@ class ResultsWindow:
         self._populate_stats_table()
 
         # Update status banner
-        total_ms = (r.cpu_time_sec or 0.0) * 1000.0
-        speedup_str = f"  |  Speedup: {r.kernel_speedup:.2f}×" if r.kernel_speedup else ""
-        match_str = "  |  Grids: Match ✅" if r.grids_match else ""
-        self.lbl_status.config(
-            text=f"✅ Finished in {total_ms:.1f} ms{speedup_str}{match_str}",
-            fg=ACCENT_GREEN
-        )
+        if self.has_hardware_cuda and self.gpu_step_times:
+            speedup_str = f"  |  Speedup: {r.kernel_speedup:.2f}×" if r.kernel_speedup else ""
+            match_str = "  |  Grids: Match ✅" if r.grids_match else ""
+            cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
+            gpu_ms = (r.cuda_kernel_time_sec or 0.0) * 1000.0
+            self.lbl_status.config(
+                text=f"✅ Finished! CPU: {cpu_ms:.1f} ms  |  CUDA: {gpu_ms:.1f} ms{speedup_str}{match_str}",
+                fg=ACCENT_GREEN
+            )
+        else:
+            cpu_ms = (r.cpu_time_sec or 0.0) * 1000.0
+            self.lbl_status.config(
+                text=f"✅ Finished Normal CPU in {cpu_ms:.1f} ms (No CUDA found on this machine)",
+                fg=ACCENT_GREEN
+            )
+
         self.btn_pause.config(state="disabled")
         for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
             if btn and btn.winfo_exists():
@@ -1030,14 +1199,21 @@ class ResultsWindow:
                 self.win.after_cancel(self._poll_job)
             except Exception:
                 pass
-        if self._sim_thread and self._sim_thread.is_alive():
-            self._sim_thread.join(timeout=1.5)
+        for th in (self.cpu_thread, self.gpu_thread):
+            if th and th.is_alive():
+                th.join(timeout=1.0)
 
         # Reset state
         self.generation = 0
         self.is_running = False
         self.is_paused = False
         self.is_finished = False
+        self.cpu_finished = False
+        self.gpu_finished = False
+        self.cpu_current_gen = 0
+        self.gpu_current_gen = 0
+        self.cpu_total_time_sec = 0.0
+        self.gpu_total_time_sec = 0.0
         self.cpu_step_times.clear()
         self.gpu_step_times.clear()
         self.cpu_current_grid = None
@@ -1055,8 +1231,10 @@ class ResultsWindow:
         self.gpu_canvas.delete("all")
         self.progress_bar["value"] = 0
         self.lbl_progress.config(text=f"Generation 0 / {self.config.iterations}  (Ready to start)")
-        self.lbl_cpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step")
-        self.lbl_gpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step")
+        self.lbl_cpu_gen.config(text="Gen: 0 (Ready)  |  — ms/step", fg=TEXT_SECONDARY)
+        init_gpu_text = "Gen: 0 (Ready)  |  — ms/step" if self.has_hardware_cuda else "❌ No CUDA found on this machine"
+        init_gpu_fg = TEXT_SECONDARY if self.has_hardware_cuda else "#ef4444"
+        self.lbl_gpu_gen.config(text=init_gpu_text, fg=init_gpu_fg)
 
         # Reset graph
         self._update_graph()
@@ -1066,6 +1244,7 @@ class ResultsWindow:
         grid_bytes = self.config.grid_size * self.config.grid_size
         n_gens = self.config.iterations
 
+        gpu_hw_str = f"{hw['gpu_name']} ({hw['cuda_version']})" if self.has_hardware_cuda else "No CUDA GPU detected"
         reset_defaults = {
             "total_time": ("—", "—"),
             "avg_ms": ("—", "—"),
@@ -1077,7 +1256,7 @@ class ResultsWindow:
             "memory": (f"{_format_bytes(grid_bytes)} (RAM)", f"{_format_bytes(grid_bytes)} (VRAM)"),
             "alive_cells": ("—", "—"),
             "results_match": ("—", "—"),
-            "hardware": (hw["cpu_name"], f"{hw['gpu_name']} ({hw['cuda_version']})"),
+            "hardware": (hw["cpu_name"], gpu_hw_str),
         }
 
         for key, (cpu_val, gpu_val) in reset_defaults.items():
@@ -1089,7 +1268,10 @@ class ResultsWindow:
         # Re-generate initial grid and render it
         self.initial_grid = create_initial_grid(self.config)
         self._render_grid(self.cpu_canvas, self.initial_grid, "cpu")
-        self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
+        if self.has_hardware_cuda and self.config.run_mode != RunMode.CPU_ONLY.value:
+            self._render_grid(self.gpu_canvas, self.initial_grid, "gpu")
+        else:
+            self._render_no_cuda_canvas()
 
         # Controls ready state (simulation NOT started automatically)
         for btn in (getattr(self, "btn_start_top", None), getattr(self, "btn_start", None)):
@@ -1189,8 +1371,9 @@ class ResultsWindow:
             self.win.unbind_all("<Button-5>")
         except Exception:
             pass
-        if self._sim_thread and self._sim_thread.is_alive():
-            self._sim_thread.join(timeout=1.0)
+        for th in (self.cpu_thread, self.gpu_thread):
+            if th and th.is_alive():
+                th.join(timeout=1.0)
         try:
             self.win.destroy()
         except Exception:
